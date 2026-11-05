@@ -161,9 +161,12 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 是否使用 WebView + JS 播放器后端。
   ///
-  /// 默认 false，保持现有 fvp 行为不变。切换为 true 后，视频由 `<video>` 元素
-  /// 在 WebView 内解码渲染，原生硬解 / 纹理 / 后台播放能力不可用。
-  static bool useJsBackend = true;
+  /// 保持 false，使用原生 fvp / libmdk 后端（轻量核心），播放不拉起 WebView2。
+  /// 切换为 true 后，视频由 `<video>` 元素在 WebView 内解码渲染，
+  /// 原生硬解 / 纹理 / 后台播放能力不可用，且每个 WebView 会拉起一批
+  /// WebView2 子进程（browser / gpu / renderer / utility / crashpad），
+  /// 拖累低配机型性能。
+  static bool useJsBackend = false;
 
   bool isMuted = false;
 
