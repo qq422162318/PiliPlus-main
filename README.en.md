@@ -1,7 +1,6 @@
-> **This local variant supports Windows only and uses fvp / libmdk with AVC/H.264 selection.** See [Windows build notes](README.windows.md) for setup and validation limits. The upstream documentation below is historical and does not describe this variant's platform support.
+> **This repository is forked from [bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus). To address performance problems on older devices, the player core has been replaced with a lightweight core (`fvp` / libmdk, AVC/H.264 only).** This variant supports Windows only; see [Windows build notes](README.windows.md) for setup and validation limits.
 
 <div align="center">
-    <img width="200" height="200" src="assets/images/logo/logo.png" alt="PiliPlus logo">
     <h1>PiliPlus</h1>
 </div>
 
@@ -9,28 +8,21 @@
 
 [中文](README.md) | English
 
-![GitHub repo size](https://img.shields.io/github/repo-size/bggRGjQaUbCoE/PiliPlus)
-![GitHub Repo stars](https://img.shields.io/github/stars/bggRGjQaUbCoE/PiliPlus)
-![GitHub all releases](https://img.shields.io/github/downloads/bggRGjQaUbCoE/PiliPlus/total)
-
 </div>
 
 <div align="center">
-    <p>A third-party Bilibili client built with Flutter</p>
-
-<img src="assets/screenshots/510shots_so.png" width="32%" alt="PiliPlus mobile screenshot" />
-<img src="assets/screenshots/174shots_so.png" width="32%" alt="PiliPlus mobile screenshot" />
-<img src="assets/screenshots/850shots_so.png" width="32%" alt="PiliPlus mobile screenshot" />
-<br/>
-<img src="assets/screenshots/main_screen.png" width="96%" alt="PiliPlus desktop screenshot" />
-<br/>
+    <p>A third-party Bilibili client built with Flutter (lightweight player core)</p>
 </div>
 
 <br/>
 
+## About
+
+This repository is forked from [bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus). To address performance problems such as playback stutter and high resource usage on older devices, the player core has been replaced from `media_kit` / libmpv with the lighter `fvp` / libmdk (AVC/H.264 only), reducing CPU/memory usage during playback and improving smoothness.
+
 ## Download
 
-Download a build from [Releases](https://github.com/bggRGjQaUbCoE/PiliPlus/releases), or clone the repository and build it locally.
+Download a build from [Releases](https://github.com/qq422162318/PiliPlus-main/releases), or clone the repository and build it locally.
 
 ## Disclaimer
 
@@ -50,13 +42,3 @@ Thank you for using PiliPlus.
 - [media-kit](https://github.com/media-kit/media-kit)
 - [dio](https://pub.dev/packages/dio)
 - And others
-
-## Star History
-
-<a href="https://star-history.dera.page/#bggRGjQaUbCoE/PiliPlus&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=bggRGjQaUbCoE/PiliPlus&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=bggRGjQaUbCoE/PiliPlus&type=Date" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=bggRGjQaUbCoE/PiliPlus&type=Date" />
- </picture>
-</a>

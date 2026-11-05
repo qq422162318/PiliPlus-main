@@ -1,4 +1,6 @@
-# Windows AVC / fvp 版本
+# Windows AVC / fvp 轻量核心版本
+
+> 本仓库 fork 自 [bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)，为解决老旧机型性能问题，将播放器核心替换为轻量核心 `fvp` / libmdk（仅选用 AVC/H.264）。本文件为 Windows 构建与验证说明。
 
 此源代码版本仅保留 Windows 构建入口，播放后端为 `fvp` / libmdk，不再使用 media_kit / libmpv。
 
