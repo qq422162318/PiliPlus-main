@@ -653,9 +653,9 @@ class PlPlayerController with BlockConfigMixin {
 
     assert(!isLive || seekTo == null);
 
-    // 保留更大的网络缓冲，避免 CDN 短暂抖动时退化为逐帧播放。
+    // 网络缓冲对齐 README 的"1–4 秒"设计意图；过大缓冲会抬升内存占用。
     player
-      ..setBufferRange(min: 1000, max: 10000)
+      ..setBufferRange(min: 1000, max: 4000)
       ..setRotate(rotate ?? 0);
     await player.open(
       video,

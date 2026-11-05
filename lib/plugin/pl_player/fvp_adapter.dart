@@ -45,7 +45,9 @@ class FvpPlayer implements PlayerBackend {
   bool _expectVideo = true;
   int _rotation = 0;
   int _bufferMin = 1000;
-  int _bufferMax = 10000;
+  // 与 README 记载的"1–4 秒"媒体队列缓冲设计意图对齐；10000ms 会让压缩包
+  // 缓冲占用过多内存。
+  int _bufferMax = 4000;
   bool _bufferDrop = false;
 
   static Future<FvpPlayer> create() async {
@@ -66,6 +68,9 @@ class FvpPlayer implements PlayerBackend {
 
   void _initializeNative() {
     if (_native != null) return;
+    // 限制渲染器内缓冲的已解码视频帧数，避免解码帧在渲染队列持续累积，
+    // 否则内存会随播放时长不断增长。
+    mdk.setGlobalOption('videoout.buffer_frames', 3);
     if (RuntimeLog.enabled) {
       mdk.setGlobalOption(
         'd3d11.sync.cpu',
