@@ -1,0 +1,18 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  win_x64:
+    uses: ./.github/workflows/win_x64.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ github.event.inputs.tag }}

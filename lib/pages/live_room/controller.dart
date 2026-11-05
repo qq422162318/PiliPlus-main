@@ -1,0 +1,854 @@
+import 'dart:async' show Timer;
+import 'dart:convert' show jsonDecode;
+import 'dart:math' as math;
+
+import 'package:PiliPlus/common/widgets/dialog/report.dart';
+import 'package:PiliPlus/common/widgets/flutter/text_field/controller.dart';
+import 'package:PiliPlus/http/live.dart';
+import 'package:PiliPlus/http/loading_state.dart';
+import 'package:PiliPlus/http/video.dart';
+import 'package:PiliPlus/models/common/super_chat_type.dart';
+import 'package:PiliPlus/models/common/video/base_quality.dart';
+import 'package:PiliPlus/models/model_owner.dart';
+import 'package:PiliPlus/models_new/live/live_danmaku/danmaku_msg.dart';
+import 'package:PiliPlus/models_new/live/live_danmaku/live_emote.dart';
+import 'package:PiliPlus/models_new/live/live_dm_info/data.dart';
+import 'package:PiliPlus/models_new/live/live_medal_wall/uinfo_medal.dart';
+import 'package:PiliPlus/models_new/live/live_room_info_h5/data.dart';
+import 'package:PiliPlus/models_new/live/live_room_play_info/codec.dart';
+import 'package:PiliPlus/models_new/live/live_room_play_info/stream.dart';
+import 'package:PiliPlus/models_new/live/live_superchat/item.dart';
+import 'package:PiliPlus/pages/common/publish/publish_route.dart';
+import 'package:PiliPlus/pages/danmaku/danmaku_model.dart';
+import 'package:PiliPlus/pages/live_room/send_danmaku/view.dart';
+import 'package:PiliPlus/pages/video/widgets/header_control.dart';
+import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
+import 'package:PiliPlus/services/runtime_log.dart';
+import 'package:PiliPlus/tcp/live.dart';
+import 'package:PiliPlus/utils/accounts.dart';
+import 'package:PiliPlus/utils/connectivity_utils.dart';
+import 'package:PiliPlus/utils/danmaku_utils.dart';
+import 'package:PiliPlus/utils/duration_utils.dart';
+import 'package:PiliPlus/utils/extension/rx_ext.dart';
+import 'package:PiliPlus/utils/global_data.dart';
+import 'package:PiliPlus/utils/num_utils.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
+import 'package:PiliPlus/utils/theme_utils.dart';
+import 'package:PiliPlus/utils/utils.dart';
+import 'package:PiliPlus/utils/video_utils.dart';
+import 'package:canvas_danmaku/canvas_danmaku.dart';
+import 'package:easy_debounce/easy_throttle.dart';
+import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
+import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:get/get.dart';
+import 'package:material_ui/material_ui.dart';
+
+const int _kMaxChatCount = 500;
+const int _kTrimCount = _kMaxChatCount + 50;
+const int _kSafeTrimIndex = 200;
+
+class LiveRoomController extends GetxController {
+  LiveRoomController(this.heroTag);
+  final String heroTag;
+
+  int roomId = Get.arguments;
+  int? ruid;
+  DanmakuController<DanmakuExtra>? danmakuController;
+  final plPlayerController = PlPlayerController.getInstance(
+    isLive: true,
+  );
+
+  final isLoaded = false.obs;
+  final roomInfoH5 = Rxn<RoomInfoH5Data>();
+
+  final liveTime = Rxn<int>();
+  Timer? liveTimeTimer;
+
+  void startLiveTimer() {
+    if (liveTime.value != null) {
+      liveTimeTimer ??= Timer.periodic(
+        const Duration(minutes: 5),
+        (_) => liveTime.refresh(),
+      );
+    }
+  }
+
+  void cancelLiveTimer() {
+    liveTimeTimer?.cancel();
+    liveTimeTimer = null;
+  }
+
+  Widget get timeWidget => Obx(() {
+    final liveTime = this.liveTime.value;
+    String text = '';
+    if (liveTime != null) {
+      final duration = DurationUtils.formatDurationBetween(
+        liveTime * 1000,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      text += duration.isEmpty ? '刚刚开播' : '开播$duration';
+    }
+    if (text.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 12,
+        color: Colors.white,
+      ),
+    );
+  });
+
+  // dm
+  LiveDmInfoData? dmInfo;
+  List<RichTextItem>? savedDanmaku;
+  int builtLength = 0;
+  final messages = <dynamic>[].obs;
+  bool get shouldRefresh => builtLength != messages.length;
+  late final RxList<SuperChatItem> superChatMsg = <SuperChatItem>[].obs;
+  final disableAutoScroll = false.obs;
+  bool autoScroll = true;
+  LiveMessageStream? _msgStream;
+
+  late final fsSC = Rxn<SuperChatItem>();
+  late final enableFSSC = Pref.enableFullScreenSC;
+  late final fsSCScale = Pref.fullScreenSCScale;
+  late final fsSCOpacity = Pref.fullScreenSCOpacity;
+
+  List<String> _keywordList = const [];
+  Set<int> _shieldUids = const {};
+
+  late final ScrollController scrollController;
+  late final RxInt pageIndex = 0.obs;
+  PageController? pageController;
+
+  final RxBool isPortrait = false.obs;
+  late List<LiveQuality> acceptQnList = [];
+  final Rxn<LiveQuality> currentQn = Rxn<LiveQuality>(
+    LiveQuality.fromCode(Pref.liveQuality),
+  );
+
+  late final bool isLogin;
+  late final int mid;
+
+  String? videoUrl;
+  bool? isPlaying;
+  late bool isFullScreen = false;
+
+  final superChatType = Pref.superChatType;
+  late final showSuperChat = superChatType != SuperChatType.disable;
+
+  final headerKey = GlobalKey<PlayerClockMixin>();
+
+  final RxString title = ''.obs;
+
+  final RxnString onlineCount = RxnString();
+
+  final RxnString watchedShow = RxnString();
+  Widget get watchedWidget => Obx(() {
+    if (watchedShow.value case final watchedShow?) {
+      return Text(
+        watchedShow,
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.white,
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  });
+
+  int chatSimpleIndex = 0;
+  int _trimDmIndex = 0;
+  int get trimDmIndex => _trimDmIndex;
+  void _trimDm() {
+    final trimCount = messages.length - _trimDmIndex;
+    if (trimCount > _kTrimCount) {
+      final endIndex = messages.length - _kMaxChatCount;
+      final canTrim = (chatSimpleIndex - endIndex) > _kSafeTrimIndex;
+      if (canTrim) {
+        messages.fillRangeOnly(_trimDmIndex, endIndex);
+        _trimDmIndex = endIndex;
+      }
+    }
+  }
+
+  VoidCallback? _removeSizeListener;
+
+  void _startSizeSub() {
+    _stopSizeSub();
+    final player = plPlayerController.videoPlayerController;
+    if (player == null) return;
+    void onSizeChanged() {
+      final size = player.videoSize.value;
+      if (size == null || size.isEmpty) return;
+      final isVertical = size.height > size.width;
+      isPortrait.value = isVertical;
+      plPlayerController.isVertical = isVertical;
+    }
+
+    _removeSizeListener = () => player.videoSize.removeListener(onSizeChanged);
+    player.videoSize.addListener(onSizeChanged);
+    onSizeChanged();
+  }
+
+  void _stopSizeSub() {
+    _removeSizeListener?.call();
+    _removeSizeListener = null;
+  }
+
+  @override
+  void onInit() {
+    super.onInit();
+    scrollController = ScrollController()..addListener(listener);
+    final account = Accounts.main;
+    isLogin = account.isLogin;
+    mid = account.mid;
+    queryLiveUrl(autoFullScreenFlag: true);
+    queryLiveInfoH5();
+    if (Accounts.heartbeat.isLogin && !Pref.historyPause) {
+      VideoHttp.roomEntryAction(roomId: roomId);
+    }
+    if (showSuperChat) {
+      pageController = PageController();
+    }
+  }
+
+  Future<void>? playerInit({
+    bool autoplay = true,
+    bool autoFullScreenFlag = false,
+  }) {
+    if (videoUrl == null) {
+      return null;
+    }
+    return plPlayerController.setDataSource(
+      NetworkSource(videoSource: videoUrl!, audioSource: null),
+      isLive: true,
+      autoplay: autoplay,
+      isVertical: isPortrait.value,
+      autoFullScreenFlag: autoFullScreenFlag,
+    );
+  }
+
+  Future<void> queryLiveUrl({bool autoFullScreenFlag = false}) async {
+    currentQn.value ??= .fromCode(
+      await ConnectivityUtils.isWiFi
+          ? Pref.liveQuality
+          : Pref.liveQualityCellular,
+    );
+    final res = await LiveHttp.liveRoomInfo(
+      roomId: roomId,
+      qn: currentQn.value!.code,
+      onlyAudio: plPlayerController.onlyPlayAudio.value,
+    );
+    if (res case Success(:final response)) {
+      if (response.liveStatus != 1) {
+        _showDialog('当前直播间未开播');
+        return;
+      }
+      final playurl = response.playurlInfo?.playurl;
+      if (playurl == null) {
+        _showDialog('无法获取播放地址');
+        return;
+      }
+      ruid = response.uid;
+      if (response.roomId case final roomId?) {
+        this.roomId = roomId;
+      }
+      liveTime.value = response.liveTime;
+      startLiveTimer();
+      isPortrait.value = response.isPortrait ?? false;
+      stream = playurl.stream;
+      _initStreamIndex();
+      await Future.wait([
+        ?initLiveUrl(
+          streamIndex: streamIndex,
+          formatIndex: formatIndex,
+          codecIndex: codecIndex,
+          liveUrlIndex: liveUrlIndex,
+        ),
+        if (!isLoaded.value && Accounts.heartbeat.isLogin) _fetchBlockRules(),
+      ]);
+      isLoaded.value = true;
+    } else {
+      _showDialog(res.toString());
+    }
+  }
+
+  late List<Stream> stream;
+  int streamIndex = 0;
+  int formatIndex = 0;
+  int codecIndex = 0;
+  int liveUrlIndex = 0;
+
+  void _initStreamIndex() {
+    final pref = Pref.liveStream;
+    if (pref != null && pref.length >= 2) {
+      for (final (si, item) in stream.indexed) {
+        if (item.protocolName != pref[0]) continue;
+        for (final (fi, format) in item.format.indexed) {
+          if (format.formatName != pref[1]) continue;
+          final ci = format.codec.indexWhere(
+            (codec) => codec.codecName == 'avc',
+          );
+          if (ci >= 0) {
+            streamIndex = si;
+            formatIndex = fi;
+            codecIndex = ci;
+            return;
+          }
+        }
+      }
+    }
+    // 默认优先 fmp4（http_hls）：网页端只有 hls.js 能解 fmp4 分片，FLV 完全放不了。
+    // 用户没选过时不要默认落在 FLV 上，否则直播必然黑屏。
+    for (final (si, item) in stream.indexed) {
+      for (final (fi, format) in item.format.indexed) {
+        final ci = format.codec.indexWhere((codec) => codec.codecName == 'avc');
+        if (ci < 0) continue;
+        if (item.protocolName == 'http_hls' ||
+            format.formatName == 'fmp4') {
+          streamIndex = si;
+          formatIndex = fi;
+          codecIndex = ci;
+          return;
+        }
+      }
+    }
+    for (final (si, item) in stream.indexed) {
+      for (final (fi, format) in item.format.indexed) {
+        final ci = format.codec.indexWhere((codec) => codec.codecName == 'avc');
+        if (ci >= 0) {
+          streamIndex = si;
+          formatIndex = fi;
+          codecIndex = ci;
+          return;
+        }
+      }
+    }
+  }
+
+  Future<void>? initLiveUrl({
+    int streamIndex = 0,
+    int formatIndex = 0,
+    int codecIndex = 0,
+    int liveUrlIndex = 0,
+  }) {
+    if (stream.isEmpty) {
+      SmartDialog.showToast('没有可播放的 AVC/H.264 直播流');
+      return null;
+    }
+    final selectedStreamIndex = streamIndex >= 0 && streamIndex < stream.length
+        ? streamIndex
+        : 0;
+    final formats = stream[selectedStreamIndex].format;
+    if (formats.isEmpty) {
+      SmartDialog.showToast('没有可播放的 AVC/H.264 直播流');
+      return null;
+    }
+    final selectedFormatIndex = formatIndex >= 0 && formatIndex < formats.length
+        ? formatIndex
+        : 0;
+    final codecs = formats[selectedFormatIndex].codec;
+    final selectedCodecIndex =
+        codecIndex >= 0 &&
+            codecIndex < codecs.length &&
+            codecs[codecIndex].codecName == 'avc'
+        ? codecIndex
+        : codecs.indexWhere((codec) => codec.codecName == 'avc');
+    if (selectedCodecIndex < 0) {
+      SmartDialog.showToast('此路线没有 AVC/H.264 直播流');
+      return null;
+    }
+    this.streamIndex = selectedStreamIndex;
+    this.formatIndex = selectedFormatIndex;
+    this.codecIndex = selectedCodecIndex;
+    this.liveUrlIndex = liveUrlIndex;
+    final CodecItem item = codecs[selectedCodecIndex];
+    acceptQnList = item.acceptQn;
+    // 以服务端返回的码率为准
+    currentQn.value = item.currentQn;
+    videoUrl = VideoUtils.getLiveCdnUrl(item, index: liveUrlIndex);
+    RuntimeLog.info(
+      'Live url protocol=${stream[selectedStreamIndex].protocolName} '
+      'format=${formats[selectedFormatIndex].formatName} '
+      'codec=${item.codecName} host=${Uri.tryParse(videoUrl ?? '')?.host}',
+    );
+    return playerInit()?.whenComplete(_startSizeSub);
+  }
+
+  Future<void> queryLiveInfoH5() async {
+    final res = await LiveHttp.liveRoomInfoH5(roomId: roomId);
+    if (res case Success(:final response)) {
+      roomInfoH5.value = response;
+      title.value = response.roomInfo?.title ?? '';
+      watchedShow.value = response.watchedShow?.textLarge;
+    } else {
+      res.toast();
+    }
+  }
+
+  void _showDialog(String title) {
+    showDialog(
+      context: Get.context!,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        actions: [
+          TextButton(
+            onPressed: Get.back,
+            child: Text(
+              '关闭',
+              style: TextStyle(color: ThemeUtils.theme.colorScheme.outline),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              if (plPlayerController.isDesktopPip) {
+                plPlayerController.exitDesktopPip();
+              }
+              Get
+                ..back()
+                ..back();
+            },
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void scrollToBottom() {
+    EasyThrottle.throttle(
+      'liveDm',
+      const Duration(milliseconds: 500),
+      () => WidgetsBinding.instance.addPostFrameCallback(_scrollToBottom),
+    );
+  }
+
+  void _scrollToBottom([_]) {
+    if (scrollController.hasClients) {
+      scrollController.animateTo(
+        scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 500),
+        curve: Curves.linearToEaseOut,
+      );
+    }
+  }
+
+  void handleJumpToBottom() {
+    disableAutoScroll.value = false;
+    if (shouldRefresh) {
+      messages.refresh();
+      WidgetsBinding.instance.addPostFrameCallback(_jumpToBottom);
+    } else {
+      _jumpToBottom();
+    }
+  }
+
+  void _jumpToBottom([_]) {
+    if (scrollController.hasClients) {
+      scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    }
+  }
+
+  void closeLiveMsg() {
+    _msgStream?.close();
+    _msgStream = null;
+  }
+
+  @pragma('vm:notify-debugger-on-exception')
+  Future<void> prefetch() async {
+    final res = await LiveHttp.liveRoomDmPrefetch(roomId: roomId);
+    if (res case Success(:final response)) {
+      if (response != null && response.isNotEmpty) {
+        messages.addAll(
+          response.where((item) => !isBlocked(item.text, item.extra.mid)),
+        );
+        scrollToBottom();
+      }
+    } else {
+      if (kDebugMode) {
+        Utils.reportError(res.toString());
+      }
+    }
+  }
+
+  Future<void> getSuperChatMsg() async {
+    final res = await LiveHttp.superChatMsg(roomId);
+    if (res.dataOrNull?.list case final list? when list.isNotEmpty) {
+      superChatMsg.addAll(list);
+    }
+  }
+
+  void clearSC() {
+    superChatMsg.removeWhere((e) => e.expired);
+  }
+
+  Future<void> _fetchBlockRules() async {
+    final res = await LiveHttp.getLiveInfoByUser(roomId);
+    if (res case Success(:final response?)) {
+      if (response.keywordList case final keywordList?) {
+        _keywordList = keywordList;
+      }
+      if (response.shieldUserList case final shieldUserList?) {
+        _shieldUids = shieldUserList.map((e) => e.uid).toSet();
+      }
+    }
+  }
+
+  void updateBlockRules(List<String> keywords, Set<int> uids) {
+    _keywordList = keywords;
+    _shieldUids = uids;
+  }
+
+  bool isBlocked(String text, Object uid) {
+    return _keywordList.any(text.contains) || _shieldUids.contains(uid);
+  }
+
+  void startLiveMsg() {
+    if (!Pref.enableShowLiveDanmaku) return;
+    if (messages.isEmpty) {
+      prefetch();
+      if (showSuperChat) {
+        getSuperChatMsg();
+      }
+    }
+    if (_msgStream != null) {
+      return;
+    }
+    if (dmInfo != null) {
+      initDm(dmInfo!);
+      return;
+    }
+    LiveHttp.liveRoomGetDanmakuToken(roomId: roomId).then((res) {
+      if (res case Success(:final response)) {
+        initDm(dmInfo = response);
+      }
+    });
+  }
+
+  void listener() {
+    final userScrollDirection = scrollController.position.userScrollDirection;
+    if (userScrollDirection == .forward) {
+      disableAutoScroll.value = true;
+    } else if (userScrollDirection == .reverse) {
+      final pos = scrollController.position;
+      if (pos.maxScrollExtent - pos.pixels <= 100 && disableAutoScroll.value) {
+        disableAutoScroll.value = false;
+        refreshMsgIfNeeded();
+      }
+    }
+  }
+
+  void refreshMsgIfNeeded() {
+    if (shouldRefresh) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        messages.refresh();
+      });
+    }
+  }
+
+  @override
+  void onClose() {
+    _stopSizeSub();
+    closeLiveMsg();
+    cancelLikeTimer();
+    cancelLiveTimer();
+    savedDanmaku?.clear();
+    savedDanmaku = null;
+    messages.clear();
+    if (showSuperChat) {
+      superChatMsg.clear();
+      if (enableFSSC) {
+        fsSC.value = null;
+      }
+    }
+    scrollController
+      ..removeListener(listener)
+      ..dispose();
+    pageController?.dispose();
+    danmakuController = null;
+    super.onClose();
+  }
+
+  // 修改画质
+  Future<void>? changeQn(LiveQuality qn) {
+    if (currentQn.value == qn) {
+      return null;
+    }
+    currentQn.value = qn;
+    return queryLiveUrl();
+  }
+
+  void initDm(LiveDmInfoData info) {
+    if (!Pref.enableShowLiveDanmaku) return;
+    if (info.hostList.isEmpty) {
+      return;
+    }
+    _msgStream =
+        LiveMessageStream(
+            streamToken: info.token,
+            roomId: roomId,
+            uid: Accounts.heartbeat.mid,
+            servers: info.hostList
+                .map((host) => 'wss://${host.host}:${host.wssPort}/sub')
+                .toList(),
+          )
+          ..addEventListener(_danmakuListener)
+          ..init();
+  }
+
+  void addDm(dynamic msg, [DanmakuContentItem<DanmakuExtra>? item]) {
+    _trimDm();
+
+    if (plPlayerController.showDanmaku) {
+      if (item != null && plPlayerController.enableShowLiveDanmaku.value) {
+        danmakuController?.addDanmaku(item);
+      }
+      if (autoScroll && !disableAutoScroll.value) {
+        messages.add(msg);
+        scrollToBottom();
+        return;
+      }
+    }
+
+    messages.addOnly(msg);
+  }
+
+  @pragma('vm:notify-debugger-on-exception')
+  void _danmakuListener(dynamic obj) {
+    try {
+      // logger.i(' 原始弹幕消息 ======> ${jsonEncode(obj)}');
+      switch (obj['cmd']) {
+        case 'DANMU_MSG':
+          final info = obj['info'];
+          final first = info[0];
+          final content = first[15];
+          final user = content['user'];
+          // final midHash = first[7];
+          final uid = user['uid'] as int;
+          final msg = info[1];
+          if (isBlocked(msg, uid)) {
+            return;
+          }
+          final Map<String, dynamic> extra = jsonDecode(content['extra']);
+          final name = user['base']['name'];
+          BaseEmote? uemote;
+          if (first[13] case Map<String, dynamic> map) {
+            uemote = BaseEmote.fromJson(map);
+          }
+          final checkInfo = info[9];
+          final liveExtra = LiveDanmaku(
+            id: extra['id_str'],
+            mid: uid,
+            dmType: extra['dm_type'],
+            ts: checkInfo['ts'],
+            ct: checkInfo['ct'],
+          );
+          Owner? reply;
+          final replyMid = extra['reply_mid'];
+          if (replyMid != null && replyMid != 0) {
+            reply = Owner(
+              mid: replyMid,
+              name: extra['reply_uname'],
+            );
+          }
+          addDm(
+            DanmakuMsg(
+              name: name,
+              text: msg,
+              emots: (extra['emots'] as Map<String, dynamic>?)?.map(
+                (k, v) => MapEntry(k, BaseEmote.fromJson(v)),
+              ),
+              uemote: uemote,
+              extra: liveExtra,
+              reply: reply,
+              medalInfo: GlobalData().showMedal
+                  ? UinfoMedal.lightMedal(user['medal'])
+                  : null,
+            ),
+            DanmakuContentItem(
+              msg,
+              color: DanmakuOptions.blockColorful
+                  ? Colors.white
+                  : DmUtils.decimalToColor(extra['color']),
+              type: DmUtils.getPosition(extra['mode']),
+              // extra['send_from_me'] is invalid
+              selfSend: isLogin && uid == mid,
+              extra: liveExtra,
+            ),
+          );
+          break;
+        case 'SUPER_CHAT_MESSAGE' when showSuperChat:
+          final item = SuperChatItem.fromJson(obj['data'], roomId);
+          superChatMsg.insert(0, item);
+          addDm(item);
+          if (!enableFSSC) return;
+          if (plPlayerController.showDanmaku &&
+              (isFullScreen || plPlayerController.isDesktopPip)) {
+            fsSC.value = item.copyWith(
+              endTime: math.min(
+                item.endTime,
+                DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10,
+              ),
+            );
+          }
+          break;
+        // case 'SUPER_CHAT_MESSAGE_DELETE' when showSuperChat:
+        //   if (obj['roomid'] == roomId) {
+        //     final ids = obj['data']?['ids'] as List?;
+        //     if (ids != null && ids.isNotEmpty) {
+        //       if (superChatType == .valid) {
+        //         superChatMsg.removeWhere((e) => ids.contains(e.id));
+        //       } else {
+        //         bool? refresh;
+        //         for (final id in ids) {
+        //           if (superChatMsg.firstWhereOrNull((e) => e.id == id)
+        //               case final item?) {
+        //             item.deleted = true;
+        //             refresh ??= true;
+        //           }
+        //         }
+        //         if (refresh ?? false) {
+        //           superChatMsg.refresh();
+        //         }
+        //       }
+        //     }
+        //   }
+        case 'WATCHED_CHANGE':
+          watchedShow.value = obj['data']['text_large'];
+          break;
+        case 'ONLINE_RANK_COUNT':
+          onlineCount.value = NumUtils.numFormat(obj['data']['count']);
+          break;
+        case 'ROOM_CHANGE':
+          title.value = obj['data']['title'];
+          break;
+      }
+    } catch (e, s) {
+      if (kDebugMode) {
+        Utils.reportError(e, s);
+      }
+    }
+  }
+
+  final RxInt likeClickTime = 0.obs;
+  Timer? likeClickTimer;
+
+  void cancelLikeTimer() {
+    likeClickTimer?.cancel();
+    likeClickTimer = null;
+  }
+
+  void onLikeTapDown(_) {
+    cancelLikeTimer();
+    likeClickTime.value++;
+  }
+
+  void onLikeTapUp([_]) {
+    likeClickTimer ??= Timer(const Duration(milliseconds: 800), onLike);
+  }
+
+  Future<void> onLike() async {
+    if (!isLogin) {
+      likeClickTime.value = 0;
+      return;
+    }
+    final res = await LiveHttp.liveLikeReport(
+      clickTime: likeClickTime.value,
+      roomId: roomId,
+      uid: mid,
+      anchorId: roomInfoH5.value?.roomInfo?.uid,
+    );
+    if (res.isSuccess) {
+      SmartDialog.showToast('点赞成功');
+    } else {
+      res.toast();
+    }
+    likeClickTime.value = 0;
+  }
+
+  void toastNotLogin() {
+    SmartDialog.showToast('账号未登录');
+  }
+
+  void onSendDanmaku([bool fromEmote = false]) {
+    if (!Pref.enableShowLiveDanmaku) {
+      SmartDialog.showToast('此 Windows 版本已关闭弹幕');
+      return;
+    }
+    if (kReleaseMode && !isLogin) {
+      toastNotLogin();
+      return;
+    }
+    Get.key.currentState!.push(
+      PublishRoute(
+        barrierColor: Colors.transparent,
+        pageBuilder: (context, animation, secondaryAnimation) {
+          return Theme(
+            data: ThemeUtils.darkTheme,
+            child: LiveSendDmPanel(
+              liveRoomController: this,
+              items: savedDanmaku,
+              autofocus: !fromEmote,
+              panelType: fromEmote ? .emoji : .none,
+              onSave: (msg) {
+                if (msg.isEmpty) {
+                  savedDanmaku?.clear();
+                  savedDanmaku = null;
+                } else {
+                  savedDanmaku = msg.toList();
+                }
+              },
+            ),
+          );
+        },
+        transitionDuration: fromEmote
+            ? const Duration(milliseconds: 400)
+            : PlatformUtils.isDesktop
+            ? const Duration(milliseconds: 350)
+            : const Duration(milliseconds: 400),
+      ),
+    );
+  }
+
+  void onAtUser(DanmakuMsg item) {
+    savedDanmaku = [
+      RichTextItem.fromStart(
+        '@${item.name} ',
+        rawText: item.extra.mid.toString(),
+        type: .at,
+        id: item.extra.id.toString(),
+      ),
+    ];
+    onSendDanmaku();
+  }
+
+  void reportSC(SuperChatItem item) {
+    if (!isLogin) {
+      toastNotLogin();
+      return;
+    }
+    autoWrapReportDialog(
+      Get.context!,
+      ReportOptions.liveDanmakuReport,
+      withContent: ReportOptions.liveDanmakuReportCheck,
+      contentRequired: ReportOptions.liveDanmakuReportCheck,
+      (reasonType, reasonDesc, banUid) {
+        return LiveHttp.superChatReport(
+          id: item.id,
+          roomId: roomId,
+          uid: item.uid,
+          msg: item.message,
+          reason: ReportOptions.liveDanmakuReport['']![reasonType]!,
+          ts: item.ts,
+          token: item.token,
+        );
+      },
+    );
+  }
+}
