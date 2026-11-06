@@ -14,7 +14,6 @@ import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/video/video_shot/data.dart';
 import 'package:PiliPlus/pages/danmaku/danmaku_model.dart';
 import 'package:PiliPlus/pages/sponsor_block/block_mixin.dart';
-import 'package:PiliPlus/plugin/pl_player/fvp_adapter.dart';
 import 'package:PiliPlus/plugin/pl_player/js_web_player.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_status.dart';
@@ -155,18 +154,15 @@ class PlPlayerController with BlockConfigMixin {
   /// 当前播放器后端（可能是原生或 JS/WebView 后端）。
   PlayerBackend? get backend => _backend;
 
-  /// JS 后端实例（仅当 [useJsBackend] 为 true 时非空），供 [JsWebVideo] 渲染。
+  /// JS 后端实例（恒非空，fvp 原生后端已废弃），供 [JsWebVideo] 渲染。
   JsWebPlayer? get jsBackend =>
       _backend is JsWebPlayer ? _backend as JsWebPlayer : null;
 
-  /// 是否使用 WebView + JS 播放器后端。
-  ///
-  /// 保持 false，使用原生 fvp / libmdk 后端（轻量核心），播放不拉起 WebView2。
-  /// 切换为 true 后，视频由 `<video>` 元素在 WebView 内解码渲染，
-  /// 原生硬解 / 纹理 / 后台播放能力不可用，且每个 WebView 会拉起一批
-  /// WebView2 子进程（browser / gpu / renderer / utility / crashpad），
-  /// 拖累低配机型性能。
-  static bool useJsBackend = true;
+  /// 视频播放核心已统一为 WebView + JS（dash.js / hls.js）。fvp / libmdk 原生
+  /// 后端已废弃：点播 DASH SegmentBase 与直播 HLS fmp4 分片都由 `<video>` 元素
+  /// 在 WebView 内解码渲染。代价是每个 WebView 会拉起一批 WebView2 子进程
+  /// （browser / gpu / renderer / utility / crashpad），以及原生硬解/纹理/
+  /// 后台播放能力不可用——这些已被 JS 解码的兼容性收益取代。
 
   bool isMuted = false;
 
@@ -593,12 +589,9 @@ class PlPlayerController with BlockConfigMixin {
   Future<PlayerBackend> _initPlayer() async {
     assert(_backend == null);
 
-    final PlayerBackend player;
-    if (useJsBackend) {
-      player = JsWebPlayer();
-    } else {
-      player = FvpPlayer();
-    }
+    // 废弃 fvp / libmdk 原生视频后端：点播（DASH SegmentBase MPD）和直播
+    // （HLS fmp4 分片，m3u8）统一走 JS 播放核心（dash.js / hls.js + WebView2）。
+    final PlayerBackend player = JsWebPlayer();
 
     await player.init(
       videoDecoders: enableHardwareDecoding
