@@ -166,7 +166,7 @@ class PlPlayerController with BlockConfigMixin {
   /// 原生硬解 / 纹理 / 后台播放能力不可用，且每个 WebView 会拉起一批
   /// WebView2 子进程（browser / gpu / renderer / utility / crashpad），
   /// 拖累低配机型性能。
-  static bool useJsBackend = false;
+  static bool useJsBackend = true;
 
   bool isMuted = false;
 

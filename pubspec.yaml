@@ -3,7 +3,7 @@ description: Windows-only PiliPlus with an AVC/H.264 fvp playback backend.
 publish_to: "none"
 
 # update when release
-version: 2.1.6+1
+version: 2.1.6+4
 
 environment:
   sdk: ">=3.13.0"

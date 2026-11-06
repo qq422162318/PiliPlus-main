@@ -120,11 +120,16 @@ Future<void> _startApplication() async {
     if (await WebViewEnvironment.getAvailableVersion() != null) {
       webViewEnvironment = await WebViewEnvironment.create(
         settings: WebViewEnvironmentSettings(
-          userDataFolder: path.join(appSupportDirPath, 'flutter_inappwebview'),
+          userDataFolder: path.join(appSupportDirPath, 'myapp_inappwebview'),
           // 播放器页面用 DASH.js 驱动 <video>，WebView2 默认会在没有用户手势时
           // 拒绝 play()。这里放开自动播放策略，否则起播会静默失败。
-          additionalBrowserArguments:
-              '--autoplay-policy=no-user-gesture-required',
+          // --js-flags 给渲染进程的 V8 堆设上限：播放器页面的 JS（dash.js +
+          // hls.js）实际只用几十 MB，设 256MB 防止渲染进程在长视频/坏流下
+          // 无限膨胀（WebView2 的每个渲染进程都是独立进程，堆大 = 内存高）。
+          additionalBrowserArguments: [
+            '--autoplay-policy=no-user-gesture-required',
+            '--js-flags=--max-old-space-size=256',
+          ].join(' '),
         ),
       );
     }

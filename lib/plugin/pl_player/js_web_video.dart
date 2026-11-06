@@ -130,12 +130,12 @@ class _JsWebVideoState extends State<JsWebVideo> {
     const html = r'''
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body,#v{width:100%;height:100%;margin:0;background:#000;overflow:hidden}#v{object-fit:contain}#a{display:none}</style>
+<style>html,body,#v{width:100%;height:100%;margin:0;background:#000;overflow:hidden}#v{object-fit:contain}</style>
 </head>
-<body><video id="v" playsinline crossorigin="anonymous"></video><audio id="a" crossorigin="anonymous"></audio>
+<body><video id="v" playsinline crossorigin="anonymous"></video>
 <script>
 (function(){
- var v=document.getElementById('v'),a=document.getElementById('a'),videoPlayer=null,audioPlayer=null,videoBlob=null,audioBlob=null,opened=null,booted=false,hls=null;
+ var v=document.getElementById('v'),videoPlayer=null,videoBlob=null,opened=null,booted=false,hls=null;
  var notify=function(type,data){try{window.flutter_inappwebview.callHandler('dashMessage',{type:type,data:data});}catch(e){}};
  function fail(where,error){notify('error',where+': '+((error&&error.message)||error||'unknown'));}
  // 库就绪前不上报全局错误：那段窗口里的失败只是“还没准备好”，不是真故障。
@@ -143,14 +143,28 @@ class _JsWebVideoState extends State<JsWebVideo> {
  window.addEventListener('unhandledrejection',function(e){if(!booted)return;fail('page promise',e.reason);});
  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
  function range(v){if(typeof v==='string')return v;if(v&&typeof v==='object'&&v.start!==undefined)return v.start+'-'+v.end;return '';}
- function manifestXml(base,duration,track,id,video){
+ // 单个 AdaptationSet / Representation。B 站 DASH 是每路一个独立 fMP4 文件
+ // （SegmentBase + indexRange），视频轨和音频轨合成一个 MPD 时各占一个
+ // AdaptationSet，BaseURL 指向各自的文件。
+ function adaptationSet(base,track,id,video){
   // 接口两种写法都发：SegmentBase/Initialization/indexRange 与
   // segment_base/initialization/index_range，取值要都认。
   var segment=track.segmentBase||track.SegmentBase||{}, init=segment.Initialization||segment.initialization||{}, index=segment.indexRange||segment.IndexRange||segment.index_range||'';
   var initRange=range(init.range||init), indexRange=range(index);
   var mime=track.mimeType||(video?'video/mp4':'audio/mp4'), codecs=track.codecs||'';
   var dims=video?' width="'+(track.width||1280)+'" height="'+(track.height||720)+'"':'';
-  return '<?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" mediaPresentationDuration="PT'+duration+'S"><Period duration="PT'+duration+'S"><AdaptationSet id="'+id+'" contentType="'+(video?'video':'audio')+'" segmentAlignment="true"><Representation id="'+id+'" bandwidth="'+(track.bandWidth||1000000)+'" mimeType="'+esc(mime)+'" codecs="'+esc(codecs)+'"'+dims+'><BaseURL>'+esc(base)+'</BaseURL><SegmentBase indexRange="'+esc(indexRange)+'"><Initialization range="'+esc(initRange)+'"/></SegmentBase></Representation></AdaptationSet></Period></MPD>';
+  return '<AdaptationSet id="'+id+'" contentType="'+(video?'video':'audio')+'" segmentAlignment="true"><Representation id="'+id+'" bandwidth="'+(track.bandWidth||1000000)+'" mimeType="'+esc(mime)+'" codecs="'+esc(codecs)+'"'+dims+'><BaseURL>'+esc(base)+'</BaseURL><SegmentBase indexRange="'+esc(indexRange)+'"><Initialization range="'+esc(initRange)+'"/></SegmentBase></Representation></AdaptationSet>';
+ }
+ // 音视频合并成单个 MPD。这样只用一个 dash.js 实例、一个 <video>、一套 MSE 缓冲，
+ // 浏览器以音频时钟为主时钟自动同步 A/V；拆成两个元素时各自走独立时钟，长时间
+ // 播放会漂移（音画不同步/反复卡顿），且双倍播放器与缓冲内存。
+ function manifestXml(videoBase,audioBase,duration,videoTrack,audioTrack){
+  var period='<Period duration="PT'+duration+'S">'+adaptationSet(videoBase,videoTrack,'video',true);
+  if(audioBase&&audioTrack&&(audioTrack.segmentBase||audioTrack.SegmentBase)){
+   period+=adaptationSet(audioBase,audioTrack,'audio',false);
+  }
+  period+='</Period>';
+  return '<?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" mediaPresentationDuration="PT'+duration+'S">'+period+'</MPD>';
  }
  // 换源时先 reset() 释放 MSE 缓冲再 revoke URL；旧 SourceBuffer 里的帧会跟着
  // 播放器实例一起多活一轮，是 JS 后端内存占用的来源之一。
@@ -187,10 +201,8 @@ class _JsWebVideoState extends State<JsWebVideo> {
  function stop(){
   if(hls){try{hls.destroy();}catch(e){}hls=null;}
   destroy(videoPlayer);videoPlayer=null;
-  destroy(audioPlayer);audioPlayer=null;
   if(videoBlob){try{URL.revokeObjectURL(videoBlob);}catch(e){}videoBlob=null;}
-  if(audioBlob){try{URL.revokeObjectURL(audioBlob);}catch(e){}audioBlob=null;}
-  v.pause();a.pause();
+  v.pause();
   // removeAttribute('src') 会触发 MSE 的 load()，把已 append 的数据全丢掉；
   // 换源时 dash.js 自己会 detachMediaSource，不需要这步。
  }
@@ -226,28 +238,33 @@ class _JsWebVideoState extends State<JsWebVideo> {
    // 真的被拒了，重试只会白跑一个 8s 定时器。
    if(v.paused){notify('log','dash play did not resume, falling back to element');elementPlay(v,'video');if(v.readyState<2)armPending();}
   }else{elementPlay(v,'video');}
-  if(audioPlayer){
-   try{audioPlayer.play();}catch(e){}
-   if(a.paused)elementPlay(a,'audio');
-  }else if(!videoPlayer)elementPlay(a,'audio');
  }
  // dash.js 默认按 30s/60s 长视频缓冲，低配机器上这一段就是几十 MB。
  // 只压缓冲，不动 abr.maxBitrate——单 Representation 的 MPD 一旦被 ABR 过滤掉，
  // 整个流就没有可用轨道了。
- function applyBufferSettings(player){
+ // 单 Representation 的 MPD 永远处于“最高质量”，dash.js 的 isTopQuality() 为真时
+ // 用的是 bufferTimeAtTopQuality/bufferTimeAtTopQualityLongForm，bufferTimeDefault
+ // 根本不生效。日志里实测缓冲停在 15s（并随每次卡顿涨到 30s），就是这个原因——
+ // 不是设的 4s。三个值要一起设，目标缓冲才真正是下面这几秒，而不是 dash.js 默认的
+ // 30s/60s（1080p60 每路会吃掉几十 MB，WebView 渲染进程内存随之高企）。
+ function applyBufferSettings(player,infinite){
   if(!player||!player.updateSettings)return;
   try{
    player.updateSettings({
     streaming:{
      buffer:{
-      bufferTimeAtTopQuality:10,
-      bufferTimeAtTopQualityLongForm:12,
-      bufferTimeDefault:4,
+      bufferTimeAtTopQuality:6,
+      bufferTimeAtTopQualityLongForm:8,
+      bufferTimeDefault:6,
       initialBufferLevel:2,
       bufferToKeep:8,
       bufferPruningInterval:5,
       fastSwitchEnabled:false,
-      mediaSourceDurationInfinity:true,
+      // 只有时长未知（d.duration<=0）才把 MSE duration 设成 Infinity；点播必须给
+      // 有限时长。dash.js 5.x 默认 mediaSourceDurationInfinity=true，会把点播当
+      // live 处理：缓冲窗变成滑窗，buffer end 钉在播放头前方固定偏移，网络一慢
+      // 播放头就追上窗沿，出现“放一会儿就卡一下”的反复缓冲（日志里 6s 卡顿）。
+      mediaSourceDurationInfinity:!!infinite,
       // dash.js 默认把 600s 以上的内容当长视频，用 60s 缓冲目标；B 站大多数
       // 稿件只有几分钟，不把阈值抬起来的话，长视频分支基本永远走不到。
       longFormContentDurationThreshold:86400
@@ -298,7 +315,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
   hls.loadSource(url);
   hls.attachMedia(v);
   // attachMedia 之后 hls.js 会自己起播；元素状态由 playing 事件同步回 Dart。
-  v.volume=Number(opened.volume);a.volume=Number(opened.volume);
+  v.volume=Number(opened.volume);
   if(autoplay){elementPlay(v,'video');}
  }
  function open(d){
@@ -309,12 +326,16 @@ class _JsWebVideoState extends State<JsWebVideo> {
   try{
    if(isOpenHls(d.video)){notify('log','HLS open '+d.video);openHls(d.video,!!d.autoplay);return;}
    if(!(window.dashjs&&window.dashjs.MediaPlayer)){fail('DASH.js load',new Error('dash.js library missing'));return;}
+   // 点播时长已知（d.duration>0）用有限 MSE 时长；未知（0）退回 Infinity，避免
+   // PT0S 的 MPD 打不开。直播走 hls.js，不经过这里。
+   var infiniteDuration=!(d.duration>0);
    // 音频轨缺失时不能整段放弃：视频轨照常播，只是没有声音轨。
    var hasVideo=!!(d.videoTrack&&(d.videoTrack.segmentBase||d.videoTrack.SegmentBase));
    var hasAudio=!!(d.audioTrack&&(d.audioTrack.segmentBase||d.audioTrack.SegmentBase));
    if(!hasVideo)throw new Error('video segmentBase missing');
-   var videoXml=manifestXml(d.video,d.duration||0,d.videoTrack,'video',true);
-   videoBlob=URL.createObjectURL(new Blob([videoXml],{type:'application/dash+xml'}));
+   // 视频+音频合并成单个 MPD / 单个 <video> / 单个 dash.js 实例（见 manifestXml）。
+   var dashXml=manifestXml(d.video,hasAudio?d.audio:null,d.duration||0,d.videoTrack,hasAudio?d.audioTrack:null);
+   videoBlob=URL.createObjectURL(new Blob([dashXml],{type:'application/dash+xml'}));
    videoPlayer=dashjs.MediaPlayer().create();
    attachEvents(videoPlayer,v,'video');
    // 第三个参数是 autoplay：dash.js 用它决定 PLAYBACK_PAUSED 时是否继续拉流
@@ -322,16 +343,8 @@ class _JsWebVideoState extends State<JsWebVideo> {
    videoPlayer.initialize(v,videoBlob,!!d.autoplay);
    // initialize() 内部会走一遍 reset()，settings.reset() 会把 updateSettings
    // 冲掉；必须在 initialize 之后再设一次，缓冲目标才真正生效。
-   applyBufferSettings(videoPlayer);
-   if(d.audio&&hasAudio){
-    var audioXml=manifestXml(d.audio,d.duration||0,d.audioTrack,'audio',false);
-    audioBlob=URL.createObjectURL(new Blob([audioXml],{type:'application/dash+xml'}));
-    audioPlayer=dashjs.MediaPlayer().create();
-    attachEvents(audioPlayer,a,'audio');
-    audioPlayer.initialize(a,audioBlob,!!d.autoplay);
-    applyBufferSettings(audioPlayer);
-   }
-   v.volume=Number(d.volume);a.volume=Number(d.volume);v.playbackRate=Number(d.rate)||1;a.playbackRate=Number(d.rate)||1;
+   applyBufferSettings(videoPlayer,infiniteDuration);
+   v.volume=Number(d.volume);v.playbackRate=Number(d.rate)||1;
    // autoplay 就在这里起播，不等 loadedmetadata。dash.js 的 play() 在 manifest
    // 解析完成前会静默丢弃（见 play() 里的说明），readyState 在 MSE 拿到第一段
    // 数据之前也一直是 0，所以等这两个条件等于永远不播。
@@ -347,7 +360,6 @@ class _JsWebVideoState extends State<JsWebVideo> {
     if(v.readyState<1){notify('log','start wait readyState='+v.readyState+' via '+why);return;}
     applied=true;
     try{videoPlayer&&videoPlayer.seek(d.start/1000);}catch(e){try{v.currentTime=d.start/1000;}catch(e2){}}
-    try{audioPlayer&&audioPlayer.seek(d.start/1000);}catch(e){try{a.currentTime=d.start/1000;}catch(e2){}}
     notify('log','start applied '+d.start+'ms via '+why+' ct='+v.currentTime.toFixed(2));
    }
    if(d.start>0){
@@ -367,11 +379,11 @@ class _JsWebVideoState extends State<JsWebVideo> {
  window.__dashCommand=function(m){
   if(!m)return;
   if(m.type==='play')play();
-  else if(m.type==='pause'){trace('pause cmd');try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();a.pause();}
-  else if(m.type==='toggle'){trace('toggle cmd elPaused='+v.paused);if(v.paused)play();else{try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();a.pause();}}
-  else if(m.type==='seek'){trace('seek cmd t='+m.time);try{v.currentTime=m.time;if(audioPlayer)a.currentTime=m.time;}catch(e){}}
-  else if(m.type==='rate'){v.playbackRate=m.rate;a.playbackRate=m.rate;}
-  else if(m.type==='volume'){v.volume=m.volume;a.volume=m.volume;}
+  else if(m.type==='pause'){trace('pause cmd');try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();}
+  else if(m.type==='toggle'){trace('toggle cmd elPaused='+v.paused);if(v.paused)play();else{try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();}}
+  else if(m.type==='seek'){trace('seek cmd t='+m.time);try{v.currentTime=m.time;}catch(e){}}
+  else if(m.type==='rate'){v.playbackRate=m.rate;}
+  else if(m.type==='volume'){v.volume=m.volume;}
  };
  v.addEventListener('loadedmetadata',function(){notify('log','video loadedmetadata '+v.videoWidth+'x'+v.videoHeight+' dur='+v.duration);notify('meta',{width:v.videoWidth,height:v.videoHeight,duration:v.duration});});
  // 进度位置不能只靠 timeupdate：MSE 挂上去之后 timeupdate 不一定按 ~4Hz 触发，
