@@ -101,12 +101,13 @@ class _EpisodePanelState extends State<EpisodePanel>
   }
 
   void _addUgcListener() {
-    if (_isSidePanel) return;
+    // 侧边面板也必须监听 indexNotifier：点击分P/剧集时 partIndex 或
+    // seasonIndex 会更新，若侧边面板不监听就收不到重建通知，导致高亮
+    // 停留在上一集（如直播回放点击"第二局"后标签不切换）。
     _ugcController.indexNotifier.addListener(_refresh);
   }
 
   void _removeUgcListener() {
-    if (_isSidePanel) return;
     _ugcController.indexNotifier.removeListener(_refresh);
   }
 
