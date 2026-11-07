@@ -650,11 +650,18 @@ class PlPlayerController with BlockConfigMixin {
     player
       ..setBufferRange(min: 1000, max: 4000)
       ..setRotate(rotate ?? 0);
+    // 用真实播放意图决定 open 是否自启播。硬编码 false 会拆成
+    // "open(autoplay:false) + 之后单独 play()" 两步：JS 后端的 dash.js 在
+    // manifest 未解析完时会把 play() 静默丢弃，元素兜底 play() 又赶在 MSE
+    // 挂载前调用，scheduleWhilePaused:false 下不再拉流——于是第一个视频
+    // （页面未就绪，open 晚于 play，autoplay 变为 true）能播，而"下一集"切换
+    // 时页面已就绪，open 先以 autoplay:false 落地，随后的 play() 被丢，导致
+    // 切换后停住不播。让 open 直接带 autoplay 走 dash.js 内部调度，与首集一致。
     await player.open(
       video,
       audioUrl: audio,
       start: seekTo,
-      play: false,
+      play: _autoPlay,
       expectVideo: !onlyPlayAudio.value,
       properties: switch (dataSource) {
         NetworkSource source => {
