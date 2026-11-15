@@ -1,130 +1,191 @@
-# Windows AVC / fvp 轻量核心版本
+# Windows 构建与排查指南
 
-> 本仓库 fork 自 [bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)，为解决老旧机型性能问题，将播放器核心替换为轻量核心 `fvp` / libmdk（仅选用 AVC/H.264）。本文件为 Windows 构建与验证说明。
+[项目首页](README.md) | [English](README.en.md)
 
-此源代码版本仅保留 Windows 构建入口，播放后端为 `fvp` / libmdk，不再使用 media_kit / libmpv。
+本分支仅维护 Windows x64。当前默认播放链路是 **Flutter → WebView2 → DASH.js / HLS.js**，不是历史上的 `fvp` / libmdk 播放链路。以下命令以 PowerShell 为例，不依赖某台机器的 SSH 地址或外部构建脚本。
 
-- 在线视频、直播和 DASH 下载只选择 AVC / H.264，不回退到 HEVC / AV1。
-- 关闭字幕轨道，移除字幕渲染设置、Anime4K 和 mpv 专属功能。
-- 默认使用 D3D11 / MFT / DXVA 硬件解码；关闭硬件解码时才使用 FFmpeg 软件解码。
-- 未保存画质偏好时，普通视频默认选择 720P（非 720P60），不再默认尽量选择最高画质；已有保存设置和手动画质选择保留。低规格设备仍高占用时可选择 480P。
-- 媒体队列缓冲设置为 1–4 秒，视频渲染纹理不放大，最大限制在 1920×1080 内。此限制不降低源视频的解码分辨率，也不是总内存上限。
-- 视频和直播弹幕固定关闭：不创建弹幕绘制层，不请求视频弹幕分段，不建立直播弹幕 WebSocket；历史开启设置和 D 键不能重新启用。弹幕发送、点击交互和弹幕趋势图同时禁用。
-- 进度/缓冲采样间隔为 500ms，不降低原生视频解码或呈现帧率；隐藏的主进度条与细进度条不再构建进度子树。加载占位保留静态布局，去掉逐帧闪光动画。
-- 保留截图、Windows 全屏、键盘/鼠标控制、桌面画中画和后台播放开关。
+## 1. 运行发布包
 
-## 运行时日志
+从 [Releases](https://github.com/qq422162318/PiliPlus-main/releases/latest) 下载便携 ZIP，完整解压后运行 `piliplus.exe`。
 
-程序默认追加写入 **`piliplus.exe` 同目录的 `log.txt`**，不受设置页面的旧 JSON 日志开关影响。记录启动版本与系统、播放地址请求结果、手动播放分支、解码器、视频尺寸与纹理、缓冲变化、倍速请求、跳转目标与结果、播放错误和未捕获异常；播放进度每 5 秒记录一次，不逐帧写入。MDK 在存在活动视频轨时返回的是已呈现视频帧时间，不是音频时钟实测。
+运行要求：
 
-日志中的 HTTP 地址、常见认证头与凭据会脱敏，不主动记录完整视频链接或请求头。超过约 5 MB 时轮换到 `log.txt.previous`，仅保留一份旧日志；重新启动追加新的会话标记。程序目录需要写入权限，目录不可写时不改写其他位置，也不会因日志错误中断播放。进程被强制结束时，最后少量尚未写完的日志可能丢失。
+- Windows x64，以及适用于该系统的 Microsoft Visual C++ 运行库。
+- [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。`WebView2Loader.dll` 不等于完整 Runtime。
+- 可访问哔哩哔哩 API 与媒体 CDN 的网络。
+- 程序目录可写，才能在 EXE 旁生成 `log.txt`。
 
-本机播放检查入口（会启动普通 Release、打开指定视频、点击播放，捕获 3 张间隔画面并关闭本次进程）：
+程序包结构如下，具体 DLL 列表以该版本发布包为准：
+
+```text
+PiliPlus/
+├─ piliplus.exe
+├─ flutter_windows.dll
+├─ WebView2Loader.dll
+├─ 其他依赖 DLL
+└─ data/
+   ├─ app.so
+   ├─ icudtl.dat
+   └─ flutter_assets/
+```
+
+不要只复制 EXE，也不要混用不同版本的 DLL、`app.so` 和资源。更新前退出 PiliPlus 并备份原目录。账号与配置保存在应用支持目录，而不是发布 ZIP 内；免安装包不代表用户数据完全随程序目录移动。
+
+## 2. 编译依赖
+
+| 依赖 | 要求 |
+| --- | --- |
+| Flutter | **3.47.8**，对应 Dart **3.13.7** |
+| Visual Studio / Build Tools | 2022，包含“使用 C++ 的桌面开发”所需组件 |
+| C++ 工具链 | MSVC x64/x86、CMake 工具、Windows SDK |
+| Git | 获取源码、Git 依赖、应用补丁与生成版本信息 |
+| NuGet | WebView2 等 Windows 插件的原生依赖恢复；`nuget.exe` 必须在 PATH 中 |
+| 网络 | 依赖解析访问 pub.dev、GitHub；原生依赖可能访问 NuGet 与其他上游下载服务 |
+
+Flutter SDK 不替代 MSVC 或 Windows SDK。建议使用独立 Flutter SDK 和 Pub 缓存：本项目需要修改 Flutter 与 `material_ui`，不要将打过补丁的环境无条件共享给其他项目。
+
+## 3. 获取源码与设置环境
+
+下面的 G 盘路径只是示例，可以换成自己的目录。不要覆盖已有源码或工具目录。
 
 ```powershell
-C:\tmp\piliplus-tools\check-runtime-log.ps1 -Playback -Bvid BV1jfxL6uEHJ -StartSeconds 25 -ScreenshotPath C:\tmp\piliplus-check.png
+git clone https://github.com/qq422162318/PiliPlus-main.git
+Set-Location PiliPlus-main
+
+$ToolsRoot = 'G:\Downloads\buildtools'
+$env:FLUTTER_ROOT = Join-Path $ToolsRoot 'flutter3478\flutter'
+$env:PUB_CACHE = Join-Path $ToolsRoot 'flutter-pub-cache'
+$env:NUGET_PACKAGES = Join-Path $ToolsRoot 'nuget-packages'
+$env:NUGET_HTTP_CACHE_PATH = Join-Path $ToolsRoot 'nuget-http-cache'
+# 将自己的 NuGet 目录加入 PATH；下面示例使用 6.14.0。
+$env:PATH = (Join-Path $ToolsRoot 'nuget-6.14.0') + ';' + $env:PATH
+$Flutter = Join-Path $env:FLUTTER_ROOT 'bin\flutter.bat'
+
+& $Flutter --version
+& $Flutter doctor -v
+Get-Command nuget.exe
 ```
 
-检查时应先退出其他 PiliPlus 实例。`-ExistingLogPath` 可只分析已有日志，不启动程序；默认预期 1×，其他倍速通过 `-ExpectedRate` 明确指定。脚本比较的是视频呈现位置与墙钟时间，只能筛查停顿和异常跳变；截图内容、声音与音画同步仍需另外验证。它不是 CPU/GPU 性能基准。
+`pubspec.yaml` 和 `.fvmrc` 指定 Flutter 版本。不要为解决依赖问题直接升级 Flutter 或全部依赖；先复现锁定版本下的错误。
 
-## 当前 G 盘构建环境
+## 4. 解析依赖、应用补丁、编译
 
-源码从 `192.168.0.102` 的 `C:\Users\admin\Downloads\PiliPlus-main` 复制到
-`G:\Downloads\buildtools\PiliPlus-active`，远端原件不修改。这里没有执行上游 `git pull`。
-
-- Flutter：`G:\Downloads\buildtools\flutter3478\flutter`（3.47.8 / Dart 3.13.7）
-- Pub 缓存：`G:\Downloads\buildtools\flutter-pub-cache`
-- NuGet：`G:\Downloads\buildtools\nuget-6.14.0\nuget.exe`（Microsoft 签名已验证）
-- NuGet 包与 HTTP 缓存：`G:\Downloads\buildtools\nuget-packages`、`nuget-http-cache`
-- C++：使用本机已安装的 Visual Studio Build Tools 2022，不迁移 Visual Studio。
-
-从任意目录运行本地构建入口（先测试，再静态检查，最后 Release 构建）：
+在项目根目录依次运行：
 
 ```powershell
-& 'G:\Downloads\buildtools\piliplus-local-build.ps1'
-# 已完成依赖解析时可使用 -SkipPub。
+& $Flutter pub get --enforce-lockfile
+if ($LASTEXITCODE -ne 0) { throw '依赖解析失败' }
+
+& .\lib\scripts\patch.ps1 windows -FlutterRoot $env:FLUTTER_ROOT
+
+& $Flutter analyze --no-pub --no-fatal-infos
+if ($LASTEXITCODE -ne 0) { throw '静态检查失败' }
+
+& .\lib\scripts\build.ps1
+if ($LASTEXITCODE -ne 0) { throw '构建版本信息生成失败' }
+
+& $Flutter build windows --release --no-pub --dart-define-from-file=pili_release.json
+if ($LASTEXITCODE -ne 0) { throw 'Windows Release 编译失败' }
 ```
 
-入口应用项目自带的 Windows 补丁，原文件备份在
-`G:\Downloads\buildtools\piliplus-windows-patches`。代理绕过仅对构建进程生效，
-不改系统代理和 Git 全局配置。构建结果不自动替换现有安装包。
+### 补丁会修改什么
 
-运行日志按本机日期保留当天记录：同日重启保留当天内容，启动时过滤其他日期，
-跨午夜首次写入清除前一天内容；超过 5 MB 清空当前文件，不再保留 `.previous`。
+`lib/scripts/patch.ps1` 对 Flutter SDK 和解析得到的 `material_ui` 应用仓库内的补丁。它先检查整组补丁、备份原文件，再修改；重复运行会识别已应用状态。默认备份目录为 `$env:TEMP\piliplus-windows-patches`，可通过 `-BackupRoot` 指定其他位置。
 
-## 原机器便携环境（历史记录）
+若报版本不匹配或补丁部分应用，先检查 SDK、包版本与备份，不要直接删除缓存或重置 SDK。
 
-- Flutter：`C:\tmp\flutter3478\flutter`，版本 **3.47.8**（Dart 3.13.7）
-- Pub 缓存：`C:\tmp\flutter-pub-cache`
-- 命令入口：`C:\tmp\piliplus-tools\flutter-env.cmd`
-- 一键 Release 构建：`C:\tmp\piliplus-tools\build-windows.cmd`
+### 版本信息如何生成
 
-便携入口直连网络，不强制设置代理。Flutter 下载镜像使用 `storage.flutter-io.cn`，Pub 使用 `pub.dev`。
+`lib/scripts/build.ps1` 生成被 Git 忽略的 `pili_release.json`，写入版本名、构建号、提交哈希与构建时间。
 
-```cmd
-cd /d C:\Users\admin\Downloads\PiliPlus-main
-C:\tmp\piliplus-tools\flutter-env.cmd --version
-C:\tmp\piliplus-tools\flutter-env.cmd doctor -v
-C:\tmp\piliplus-tools\build-windows.cmd
+- Git 工作树：构建号取自 `git rev-list --count HEAD`，脚本同时改写 `pubspec.yaml` 的构建号。
+- 不含 `.git` 的源码目录：使用 `pubspec.yaml` 声明的构建号，提交哈希记为 `local`。
+- 浅克隆会导致提交数不足；正式发布应使用完整历史。若使用过 `--depth`，先执行 `git fetch --unshallow`。
+
+这两个文件可能因构建而变化，不要把生成文件、包缓存或完整编译产物直接提交进源码仓库。
+
+## 5. 打包与校验
+
+编译输出：
+
+```text
+build\windows\x64\runner\Release
 ```
 
-`build-windows.cmd` 也可接受其他项目目录作为第一个参数。
-
-## 必需的 C++ 工具链
-
-Flutter SDK 已便携放置，但 Windows 原生插件仍需要 Visual Studio / Build Tools 的 **Desktop development with C++** 工作负载，包含 MSVC x64/x86、C++ CMake 工具和 Windows SDK。仅解压 Flutter 不能替代这些组件。
-
-目前此机器已安装 **Visual Studio Build Tools 2022 17.14.44**（MSVC 14.44、Windows SDK 10.0.19041.0），`flutter doctor -v` 的 Windows C++ 检查通过。
-
-Windows WebView 插件还需要 `nuget.exe`。便携 NuGet **6.14.0** 位于 `C:\tmp\piliplus-nuget-MoAWhY`，已验证 Microsoft 数字签名；`flutter-env.cmd` 已将此目录加入 PATH，无需全局安装。若移动便携目录，需要同步更新入口中的 NuGet 路径。仅安装 Build Tools 而没有 NuGet 会导致 `NUGET-NOTFOUND`、`MSB3073` 和退出码 9009。
-
-## 其他 Flutter 环境构建
-
-此项目需要修改 Flutter SDK 和 `material_ui` 的 Windows 通用补丁，否则整库分析会缺少项目使用的接口。
+将整个 Release 目录打包，而不是只打包 EXE。先确保输出名称不存在，再运行：
 
 ```powershell
-$env:FLUTTER_ROOT = 'C:\path\to\flutter'
-flutter pub get
-.\lib\scripts\patch.ps1 windows
-flutter analyze --no-pub --no-fatal-infos
-.\lib\scripts\build.ps1
-flutter build windows --release --no-pub --dart-define-from-file=pili_release.json
+$Release = Join-Path (Get-Location) 'build\windows\x64\runner\Release'
+$Zip = Join-Path (Get-Location) 'PiliPlus-windows-local.zip'
+if (Test-Path $Zip) { throw '目标 ZIP 已存在，请换一个名称' }
+Compress-Archive -Path "$Release\*" -DestinationPath $Zip
+Get-FileHash -LiteralPath $Zip -Algorithm SHA256
 ```
 
-补丁脚本使用 `.dart_tool/package_config.json` 中实际解析的 `material_ui` 路径，兼容自定义 `PUB_CACHE`。它先检查整组补丁，备份原文件，再应用；重复执行会识别已应用状态，不删除包缓存、不重置 SDK、不提交 Git。已打补丁的 SDK / 包缓存不应随意重置或重新下载。
+建议随发布包提供构建版本、源码提交、测试结果和 SHA-256 校验文件。正式发布前下载上传后的资产并比较哈希。发布标签应指向实际编译的源码；不要把旧二进制仅改 ZIP 文件名作为新版本发布。
 
-Release 目录为 `build\windows\x64\runner\Release`。便携发布必须携带该目录的全部 DLL 和 `data`，不能只复制 EXE。
+当前发布渠道为 [GitHub Releases](https://github.com/qq422162318/PiliPlus-main/releases)。工作流触发方式以仓库的 `.github/workflows` 和 GitHub 实际状态为准，不能假定推送标签一定会自动构建发布。
 
-## 验证范围
+## 6. 测试与验证边界
 
-- 便携 Flutter `--version` 验证成功，`pub get` 直连解析成功。
-- 加入运行日志后的整库 `flutter analyze --no-pub --no-fatal-infos` 返回 0：**0 错误、0 警告、53 条 info**（主要是弃用接口和代码风格提示，含日志异步 I/O 提示）；日志文件操作保留异步方式，避免在 UI 线程同步读写。默认将 info 视为失败的分析命令仍会非零退出。
-- Windows 补丁脚本已在独立的原始 SDK 文件副本上验证首次应用、原文件备份与重复执行；实际 SDK 和 material_ui 均识别为已应用。
-- `build.ps1` 已验证可在无 Git 的源代码目录生成本地构建信息。
-- **2026-10-31 14:45：`C:\tmp\piliplus-tools\build-windows.cmd` 全流程验证成功，退出码 0**。包含预初始化修复的普通 `main.dart` Release 已生成（不是诊断入口）；确认存在 `piliplus.exe`、Flutter / fvp / MDK / cnativeapi DLL、`data/app.so`、ICU 数据及 Flutter assets，输出目录未发现 media_kit / mpv 文件。普通 Release 已单独启动检查，窗口在 12 秒检查期内未退出，随后正常关闭；该启动检查不等同于 Release 在线播放验证。
-- **2026-10-31 15:21：包含运行日志的普通 `main.dart` Release 构建成功，退出码 0**；必需 EXE、DLL、`data/app.so`、ICU 和 assets 均存在，未发现 mpv / media_kit 文件。15:22 和 15:23 两次实际启动已验证同目录 `log.txt` 创建及会话追加，当前日志含 2 个会话，程序均已关闭。第二次窗口截图的 OCR 识别出 PiliPlus 首页与推荐内容；此结果不是视频画面确认。
-- 本轮普通 Release 的视频链接进入源查询与手动播放流程，但 MDK 报 `reader open error` / `媒体打开失败 (-1)`。这些错误、CID、缓冲状态及调用栈已写入 `log.txt`；未产生准备成功或播放进度记录，故本轮在线视频播放验证失败，不能宣称播放已修复。日志未发现未脱敏的 HTTP URL。
-- 构建错误已修复：便携入口加入 NuGet 路径，并预先检查 NuGet。前一轮在批处理运行期间修改脚本导致编译完成后误执行残留命令；最终重跑期间未修改入口，正常显示 `Build completed`。上游 WebView 插件仍有 CMake CMP0175 开发警告，不阻止此次构建。
-- 加入运行日志前，`flutter test --no-pub --concurrency=1`：**30 个测试通过、1 个原生 opt-in 测试跳过，退出码 0**。覆盖播放器延迟初始化、音量单位、未打开媒体的释放、纹理组件、AVC 选流、音频质量、CDN URL、账号删除、弹幕关闭及手动播放的预初始化状态。原生测试因未提供 `PILIPLUS_NATIVE_TEST_MEDIA` 而跳过；原生播放另由实际应用诊断入口验证。
-- 加入运行日志后，详细输出的整套测试为 **32 个通过、1 个跳过、账号测试套件加载失败，退出码 1**，错误为 `Connection closed before test suite loaded`；账号的 2 个测试单独复测通过，播放器的 4 个测试单独复测通过。新增日志的 4 个测试通过（顺序追加、脱敏、轮换、不可写目录），但不能据此宣称本轮整套测试通过。
-- 测试与 Windows 构建必须串行运行，避免争用原生构建锁。以上为构建、静态分析和自动化测试结果，不代表已测试原生视频播放性能。
+如果工作副本中有完整的 `test` 目录，可运行：
 
-2026-10-31 在 Windows 10 1809 / Intel HD Graphics 上完成适配层播放检查：本地 H.264 1280×720 样片和在线 AVC 852×480 DASH（独立 AAC 音轨）均加载成功；间隔捕获的 MDK 原生图像和 Flutter 视频区域有明显帧变化。该结果说明这两段样片的解码与 Flutter 纹理路径能工作，不保证所有用户视频正常，也不等同于最终桌面窗口的人工目视确认。
+```powershell
+& $Flutter test --no-pub
+```
 
-已修复手动播放把“开启预初始化”误当作“当前媒体已准备”的问题：仅当当前页面已准备、共享播放器不在处理中、加载成功、播放器存在且 CID 相符时才复用；否则初始化当前视频，避免只有旧媒体声音而新页面没有视频控件。新增 4 个回归测试通过。
+若有 `test/plugin/pl_player/dash_shell_test.cjs`，可用 Node.js 运行嵌入式页面测试：
 
-同日通过诊断入口调用真实 `main.dart`，进入正式视频页面并调用其手动播放处理：在线 AVC 1920×1080 视频加载成功，非“听视频”模式，播放位置持续推进至 24 秒；视频区域的直接 Flutter 捕获在约 4～8 秒间有明显帧变化（21132/27013 个采样点差异超过阈值）。无捕获到的 APP / Flutter 异常。桌面截屏仍混入终端内容，不能用它宣称最终桌面窗口已人工目视确认；也未复现用户最初那段视频的黑屏。
+```powershell
+node --test .\test\plugin\pl_player\dash_shell_test.cjs
+```
 
-15:25 的用户播放日志已定位另一条无画面路径：`prepare` 返回时 `videoTracks=0 video=0x0 texture=null`，随后选中 D3D11 且视频信息变为 1280×720，但纹理仍为空。适配层已改为等待 loaded 与有效视频轨信息，再校验 H.264 并创建纹理后才标记初始化成功；显式“听视频”模式可只等待音频媒体信息。首次加载不再先设置空的主媒体，外部音轨在每次打开时显式设置或清空。新增 5 个就绪时序测试单独运行通过；原有显示组件测试本轮出现 `did not complete`，整组测试仍未通过。15:46 普通 Release 构建成功（分析 0 错误、0 警告、53 条 info）；15:47 用同一视频 BV1jfxL6uEHJ 检查仍在媒体打开阶段报 `prepare resultMs=-1 streams=0` / `reader open error`，未进入纹理创建，实际播放验证失败。随后同一视频的独立 Debug 播放检查成功：AVC 852×480、独立音轨、纹理 592178192，位置推进至 12.969 秒；原生与 Flutter 视频区域捕获均有变化。该结果不替代正式 Release 验证。16:01 正式页面 Debug 诊断中，同一视频的外部音轨先调用 prepared callback，Dart 此时读到 `resultMs=0 streams=0 status=loading`；随后主视频 loaded，创建 1280×720 纹理 679843760，播放推进至 28 秒，正式视频区域直接捕获有变化（1396/54549 个采样点超过差异阈值）。据此补充处理 DASH 提前的负准备结果：仅音视频分离的视频模式继续等待有效主视频，单源失败仍立即报错，真正无视频则超时报错。随后普通 `main.dart` Release 编译成功，就绪时序测试增至 8 个并全部通过。16:22 同一视频从 25 秒恢复时走过提前 `prepare=-1` 分支，随后创建 1280×720 纹理；Release 截图 OCR 已识别到实际视频内容。但 15.2 秒内已呈现视频帧位置只推进 500 ms，尚不能算正常连续播放。
+注意：仓库目前的 `.gitignore` 含 `test*` 规则，部分本地测试文件没有提交。**全新克隆不能保证带有这些测试**，不要把本地测试结果表述为所有人都可直接从该标签复现的测试集。测试与 Windows 构建应串行执行，避免原生构建锁争用。
 
-16:28 同视频 Debug 从 25 秒开始，以 1× 倍速接近实时推进；原始日志没有回退，检查输出的重复段来自两个脚本各自输出日志尾部。16:33 未重新构建的普通 Release 从保存的 55 秒开始，也在 25.8 秒墙钟时间内推进约 25.8 秒。16:36 固定从 25 秒再次复测，提前 `prepare=-1` 分支重现慢推进及起播位置跳变；总体推进比恰好 1×，但逐区间检查正确判定失败。因此不能以一次非零位置或总体平均速度宣称正常播放。检查脚本现要求至少 3 个样本、10 秒观察、总体与各区间速度匹配；6 项正常/慢速/跳变/回退/不足样本/2× 速度检查用例通过。适配层新增提前失败后的非零起播位置 seek 确认，完成后才标记 prepared，同时记录倍速与 seek；包含恢复跳转的 12 个就绪测试通过。此修改后的普通 Release 构建成功，但 16:50 实测提前回调分支的恢复 seek 被原生拒绝（`-10`），因此播放验证失败。日志确认请求时原起播 seek 尚未完成。随后补充事件驱动、有 10 秒超时的准备等待：loaded + prepared、无 seeking、播放器 paused 后才发恢复 seek；新增 3 项状态顺序/已就绪/超时清理测试，共 15 项通过。含此等待的普通 Release 构建成功（0 错误、0 警告、57 条 info）；17:01 原生实测原跳转等待结束，但额外 seek 返回取消（`-2`），播放验证仍失败。随后移除额外 seek 及其辅助函数/4 项测试，仅保留原 `prepare(startMs)` 的完成等待，不重复发起相同跳转；11 项保留的就绪/准备等待测试全部通过。17:12 普通 `main.dart` Debug 实测同视频从 25 秒开始，1280×720、D3D11、rate=1.0，约 25.5 秒内进度推进约 25.5 秒；间隔截图 OCR 分别识别到“进阶开局”与“选择负面特性”不同视频内容。但本次 prepare 返回有效位置，未覆盖提前负回调分支。含此简化恢复的普通 Release 构建成功（0 错误、0 警告、57 条 info）；17:21 固定从 25 秒实测覆盖提前负回调分支，准备等待结束后创建 1280×720 纹理，rate=1.0。但 30.799 秒内已呈现视频位置仅推进 5.964 秒（0.194×），严格检查失败；前约 25 秒几乎停滞，之后才接近正常推进。间隔截图 OCR 识别到“进阶开局 / 水培”与“挑战模式”不同内容，证明有画面，不证明连续播放或音画同步正常。准备完成等待未解决此故障，仍需排查音视频分离源的起播时间同步。
+`v2.1.6.9` 本地发布验证：14 项嵌入式页面测试通过；58 项 Flutter 测试通过、1 项跳过；Windows Release 编译成功；ZIP 中 72 个文件与编译输出逐个校验，发布资产下载校验一致。真实原生媒体测试因未提供 `PILIPLUS_NATIVE_TEST_MEDIA` 样片而跳过。
 
-17:31–17:35 正在运行的普通 Release 日志提供了额外对照：BV1RDHD6dECA 从 0 秒起播，提前 prepare=-1 后创建 1280×720 纹理，约 97 秒内位置接近 1× 持续推进；BV1mTxy6iEHK（720×1280）和 BV11Fx66REUr（1280×720）从 0 秒也接近 1× 推进。后者的播放中 seek 返回有效位置，随后恢复接近 1× 推进。这说明提前负回调不一定导致慢播放，非零起播位置仍是待核实的重要区别；这些日志不证明听感、音画同步或窗口内容。独立音视频时间戳诊断入口已编译成功，但运行时发现既有正式版 PID 2112，按保护规则拒绝启动第二实例，未关闭该窗口，尚无本次原生时钟诊断结果。
+**这些结果不验证最终画面、声音、音画同步、全屏/缩放或桌面图标点击范围。** 尤其 WebView 原生窗口的显示和尺寸仍需运行时检查；不能以音频正常或 `currentTime` 推进证明视频画面正常。
 
-2026-10-31 18:03 CPU 基线：i3-4020Y 1.50GHz（2 核 / 4 逻辑处理器），修改低资源策略前的普通 Release 播放 BV1jfxL6uEHJ，从 0 秒起播、D3D11 硬解、1280×720、rate=1.0，日志位置约 25 秒内接近 1× 推进，窗口截图 OCR 识别到实际视频内容。启动完成后以 15 秒进程 CPU 时间增量除以墙钟时间及逻辑处理器数量，平均 CPU=7.65%，工作集=213.7MiB、私有内存=208.5MiB。此数不包含点击起播阶段峰值，不是新优化收益，也不覆盖全屏、其他视频或音画同步。测量脚本 `run-player-smoke.ps1 -MeasureCpu` 在截图之前测量，避免截图操作混入采样。
+## 7. 日志规则
 
-18:10 同一普通 Release 再测点击峰值：点击后的 5 个约 1 秒 CPU 样本为 20.54%、10.42%、8.88%、15.92%、8.57%；稳定播放 15 秒平均 7.84%，工作集 215.1MiB。该次严格进度检查为 0.998× 并通过逐区间检查；本次关闭等待超时，但随后确认进程已经退出。仅两次同条件基线，不能推广到全屏或所有码率。
+`log.txt` 写在 `piliplus.exe` 同目录，不依赖旧的 JSON 日志设置开关。
 
-低资源源码修改包括默认普通 720P、500ms 进度采样、隐藏进度条不构建、静态加载骨架；准备完成日志补充源帧率，便于区分 30/60fps 负载。首次合并测试中 7 项画质和 11 项就绪测试通过，静态骨架组件测试报 `did not complete`，退出码 1；该组件单独复测通过。第二次合并测试中 7 项画质与 1 项组件测试通过，就绪套件加载报 `Connection closed before test suite loaded`，退出码 1。改用 3 个独立 Flutter 进程串行复测后，7 项画质、1 项静态骨架、11 项播放就绪测试全部通过，脚本退出码 0；此前合并测试失败仍保留，不能宣称整库测试通过。包含减负修改的普通 `main.dart` Release 已构建成功（退出码 0，静态分析 0 错误、0 警告、57 条 info）；上游 WebView 的 CMake CMP0175 开发警告未阻止构建。18:44 新版首次后测：同视频从 0 秒起播、1280×720、D3D11、29.97fps、1×，起播 5 个约 1 秒样本为 11.43%、22.12%、6.62%、7.41%、8.96%，稳定播放 15 秒平均 CPU=8.18%，工作集=215.6MiB、私有内存=211.2MiB。视频呈现进度为 0.999×，逐区间检查通过；首末窗口截图 OCR 识别到不同视频内容。这次没有显示播放 CPU 或内存下降，不能把界面减负称为已验证的性能收益；18:46 第二次同条件后测：起播 5 个约 1 秒样本为 23.93%、7.67%、14.81%、7.39%、5.80%；稳定播放 15 秒平均 CPU=8.25%，工作集=221.7MiB、私有内存=216.9MiB。仍为 1280×720、29.97fps、D3D11、1×，呈现进度 0.999× 且逐区间通过，首末截图 OCR 有不同视频内容；检查结束后确认无遗留 PiliPlus 进程。两次新版结果均未显示相对旧版稳定 CPU=7.65%/7.84% 的下降，起播仍有 20% 以上样本；少量运行不足以归因为回归或证明界面修改没有局部收益，但这轮不能宣称已解决起播 CPU 峰值。未实际测量 480P 的节省幅度。尚未测 GPU，不能保证 1.5 GHz 机器在任意码率和分辨率下流畅。低规格设备建议先验证 480p / 720p AVC；此版本弹幕已固定关闭，但解码和播放器其他界面仍有资源开销。
+- 按本机本地日期过滤，保留当天记录及其堆栈续行。
+- 同一天重启追加会话；跨午夜后的首次写入清除前一天内容。程序空闲时不会专门启动午夜清理任务。
+- 不再轮转到 `.previous`，旧轮转文件在启动写日志时删除。
+- 约 5 MB 上限；达到上限后清空当前文件再写入，所以当天早先记录也可能被清除。
+- 常见 URL、认证头和凭据会脱敏，但仍应在分享前人工检查。
+- 不可写目录会停止日志记录，不会自动迁移日志路径或让日志错误中断播放。
 
-跨平台 Pub 插件可能仍在锁文件或全局缓存中列出 Android/iOS/Linux/macOS 的传递包，这是上游插件声明的依赖；本项目不再含这些平台的应用源码或构建工作流。
+报告问题前先复制当天日志。不要上传账号数据库、Cookie 或令牌。
+
+## 8. 排查常见问题
+
+### 依赖解析或 API 请求报 HTTP 501
+
+若错误为 `Proxy failed to establish tunnel` 或 `Unsupported method ('CONNECT')`，先检查代理是否支持 HTTPS CONNECT。
+
+```powershell
+Get-ChildItem Env: | Where-Object { $_.Name -match 'proxy' }
+```
+
+通过开发终端启动的程序会继承该终端的环境变量。某些仅转发特定 API 的本地服务不是通用 HTTPS 代理。只在确认变量错误时，才为本次子进程清理它们：
+
+```powershell
+# 仅影响当前 PowerShell 及之后启动的子进程，不改系统设置。
+Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY, Env:ALL_PROXY -ErrorAction SilentlyContinue
+```
+
+需要代理时改用自己的有效地址，并检查 `NO_PROXY` 是否意外设为 `*`。不要把开发工具的认证令牌或专用代理配置写进项目。
+
+### `NUGET-NOTFOUND` / MSB3073 / 9009
+
+确认 `Get-Command nuget.exe` 能找到工具，并且 Visual Studio / Build Tools 的 C++ 组件完整。下载 NuGet 后验证来源与 Microsoft 签名。不要仅安装 Build Tools 就认为 NuGet 已存在。
+
+### 只有声音、没有画面，或 WebView 遮挡桌面
+
+确认 WebView2 Runtime 已安装。记录问题发生时的窗口尺寸、显示缩放比例、全屏/缩放状态及版本，配合当天日志排查原生 WebView 窗口边界。先退出其他实例；不要只看播放时间和音频就断言画面恢复。
+
+### 旧版 fvp / mpv 设置没有效果
+
+当前默认后端是 JS。旧的原生解码器、缓冲、旋转或截图接口并不全部实现；旧文档里的 D3D11/MFT/DXVA 选择、纹理限制或 MDK 性能数据不能直接套用到这个后端。
