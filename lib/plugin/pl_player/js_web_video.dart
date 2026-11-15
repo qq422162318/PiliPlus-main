@@ -29,6 +29,8 @@ class JsWebVideo extends StatefulWidget {
 
   final JsWebPlayer controller;
   final Color fill;
+
+  /// 仅用于页面内视频的显示比例；外层 FittedBox 负责整体缩放。
   final double? aspectRatio;
 
   @override
@@ -199,6 +201,9 @@ class _JsWebVideoState extends State<JsWebVideo> {
   try{player.reset();}catch(e){}
  }
  function stop(){
+  wantPlay=false;playGeneration++;cancelPending();
+  if(traceTimer!==null){clearInterval(traceTimer);traceTimer=null;}
+  traceLast={};
   if(hls){try{hls.destroy();}catch(e){}hls=null;}
   destroy(videoPlayer);videoPlayer=null;
   if(videoBlob){try{URL.revokeObjectURL(videoBlob);}catch(e){}videoBlob=null;}
@@ -206,25 +211,54 @@ class _JsWebVideoState extends State<JsWebVideo> {
   // removeAttribute('src') 会触发 MSE 的 load()，把已 append 的数据全丢掉；
   // 换源时 dash.js 自己会 detachMediaSource，不需要这步。
  }
- // 起播窗口内的兜底重试：dash.js 的 play() 在 manifest 解析完成前会静默丢弃
- // （原因见下），而它的 gate 是同步的，调用返回后元素还是 paused。
- var pendingTimer=null,pendingCount=0;
+ // 起播重试只属于当前一次播放请求；暂停和换源必须同时撤销 interval 与 timeout。
+ // paused=false 只说明 play 请求被接受，不能证明媒体已拿到数据并真正起播。
+ var pendingTimer=null,pendingTimeout=null,pendingCount=0;
+ var wantPlay=false,playGeneration=0,traceTimer=null;
+ function cancelPending(){
+  if(pendingTimer!==null)clearInterval(pendingTimer);
+  if(pendingTimeout!==null)clearTimeout(pendingTimeout);
+  pendingTimer=null;pendingTimeout=null;
+ }
+ function finishPending(){
+  if(pendingTimer===null)return;
+  var retries=pendingCount;
+  cancelPending();
+  notify('log','pending play satisfied after '+retries+' retries');
+ }
  function pendingTick(){
-  if(v.paused||!pendingTimer)return;
-  clearInterval(pendingTimer);pendingTimer=null;
-  notify('log','pending play satisfied after '+pendingCount+' retries');
+  if(!wantPlay){cancelPending();return;}
+  if(!v.paused&&v.readyState>=3&&!v.seeking){finishPending();return;}
+  // 未暂停但正在等数据时不要重复调用 play；被初始化打断后仍暂停才重试。
+  if(v.paused){
+   pendingCount++;
+   try{if(videoPlayer)videoPlayer.play();}catch(e){}
+   if(v.paused)elementPlay(v,'video');
+  }
  }
  function armPending(){
-  if(pendingTimer)return;
+  if(pendingTimer!==null||!wantPlay)return;
   pendingCount=0;
-  pendingTimer=setInterval(function(){pendingCount++;pendingTick();},150);
-  setTimeout(function(){if(pendingTimer){clearInterval(pendingTimer);pendingTimer=null;notify('log','pending play gave up after '+pendingCount+' retries');}},8000);
+  pendingTimer=setInterval(pendingTick,150);
+  pendingTimeout=setTimeout(function(){
+   var retries=pendingCount;
+   cancelPending();
+   notify('log','pending play timed out after '+retries+' retries readyState='+v.readyState);
+  },8000);
  }
  function elementPlay(el,who){
-  try{var p=el.play();if(p&&p.catch)p.catch(function(e){if(!/interrupted by a call to pause/.test((e&&e.message)||''))fail(who+' play',e);});}
-  catch(e){fail(who+' play',e);}
+  var generation=playGeneration;
+  function rejected(e){
+   if(generation!==playGeneration||!wantPlay)return;
+   // 换源/load()/pause() 中断 pending promise 是可重试的，不是解码错误。
+   if(e&&(e.name==='AbortError'||/interrupted by a call to (?:pause|load)|new load request/.test(e.message||'')))return;
+   wantPlay=false;cancelPending();fail(who+' play',e);
+  }
+  try{var p=el.play();if(p&&p.catch)p.catch(rejected);}
+  catch(e){rejected(e);}
  }
  function play(){
+  wantPlay=true;
   notify('log','play called videoPlayer='+(!!videoPlayer)+' paused='+v.paused+' readyState='+v.readyState+' autoplay='+(opened&&opened.autoplay)+' isReady='+(videoPlayer&&videoPlayer.isReady&&videoPlayer.isReady()));
   // dash.js 的 play() 只在“元素已暂停”时才会走到 PlaybackController.play()，
   // 而它的 isPaused() 在 manifest 解析完成前返回 null（还没有激活的 streamInfo），
@@ -234,10 +268,14 @@ class _JsWebVideoState extends State<JsWebVideo> {
   // autoplay=true 时 dash.js 的调度器本来就在拉流，元素起播即可。
   if(videoPlayer){
    try{trace('play entry');videoPlayer.play();trace('play exit');}catch(e){}
-   // 只有还没拿到数据时才需要兜底重试；已经缓冲好的话 dash.js 丢了这次请求就是
-   // 真的被拒了，重试只会白跑一个 8s 定时器。
-   if(v.paused){notify('log','dash play did not resume, falling back to element');elementPlay(v,'video');if(v.readyState<2)armPending();}
+   if(v.paused){notify('log','dash play did not resume, falling back to element');elementPlay(v,'video');}
   }else{elementPlay(v,'video');}
+  if(v.paused||v.readyState<3)armPending();
+ }
+ function pause(){
+  wantPlay=false;playGeneration++;cancelPending();
+  try{if(videoPlayer)videoPlayer.pause();}catch(e){}
+  v.pause();
  }
  // dash.js 默认按 30s/60s 长视频缓冲，低配机器上这一段就是几十 MB。
  // 只压缓冲，不动 abr.maxBitrate——单 Representation 的 MPD 一旦被 ABR 过滤掉，
@@ -284,13 +322,16 @@ class _JsWebVideoState extends State<JsWebVideo> {
   player.on(events.ERROR,function(e){fail(who+' DASH.js',(e&&e.error)||e);});
   player.on(events.MANIFEST_LOADED,function(){notify('log',who+' manifest loaded');});
   player.on(events.PLAYBACK_METADATA_LOADED,function(){notify('log',who+' metadata loaded');});
-  player.on(events.PLAYBACK_PLAYING,function(){notify('log',who+' playing');notify('state',{playing:true,buffering:false});});
+  player.on(events.PLAYBACK_PLAYING,function(){
+   if(player!==videoPlayer)return;
+   if(!wantPlay){pause();return;}
+   notify('log',who+' playing');notify('state',{playing:true,buffering:false});
+  });
   player.on(events.PLAYBACK_PAUSED,function(){notify('state',{playing:false,buffering:false});});
   player.on(events.PLAYBACK_WAITING,function(){notify('state',{playing:!element.paused,buffering:true});});
-  player.on(events.PLAYBACK_ENDED,function(){notify('ended',{});});
-  // dash.js 在没有任何一次 play() 真正生效时不会发 PLAYBACK_PLAYING，但元素上的
-  // play() 一定会先触发 playing 事件——用它把“兜底起播”同步回 Dart。
-  element.addEventListener('playing',function(){notify('state',{playing:true,buffering:false});});
+  // 原生 ended 在页面级统一上报，避免与 DASH 事件重复触发下一集。
+
+  // 元素监听器在页面级只注册一次，DASH 与 HLS 共用，避免换源时累计回调。
   attachTrace(player,who);
  }
  // 直播流不是 DASH：接口的 http_hls 实际是 fmp4 分片，交给 hls.js 走 MSE。
@@ -314,12 +355,12 @@ class _JsWebVideoState extends State<JsWebVideo> {
   });
   hls.loadSource(url);
   hls.attachMedia(v);
-  // attachMedia 之后 hls.js 会自己起播；元素状态由 playing 事件同步回 Dart。
-  v.volume=Number(opened.volume);
-  if(autoplay){elementPlay(v,'video');}
+  // HLS 同样由页面级媒体事件回传播放状态，并遵守用户的播放/暂停意图。
+  v.volume=Number(opened.volume);v.playbackRate=Number(opened.rate)||1;
+  if(autoplay)play();
  }
  function open(d){
-  stop();opened=d;
+  stop();opened=d;wantPlay=!!d.autoplay;
   if(!(window.dashjs&&window.dashjs.MediaPlayer)&&!(window.Hls&&window.Hls.isSupported)){
    fail('DASH.js load',new Error('player libraries missing'));return;
   }
@@ -340,7 +381,10 @@ class _JsWebVideoState extends State<JsWebVideo> {
    attachEvents(videoPlayer,v,'video');
    // 第三个参数是 autoplay：dash.js 用它决定 PLAYBACK_PAUSED 时是否继续拉流
    // （scheduleWhilePaused=false 时，非 autoplay 的流会被停掉调度器）。
-   videoPlayer.initialize(v,videoBlob,!!d.autoplay);
+   // dash.js 5.2.1 的第 4 个参数是 startTime（秒），在拉取首段与起播前生效。
+   // 不再在 loadedmetadata/timeout 中迟到地 seek，旧媒体也不会污染新媒体的位置。
+   var start=Number(d.start)/1000;
+   videoPlayer.initialize(v,videoBlob,!!d.autoplay,isFinite(start)&&start>0?start:NaN);
    // initialize() 内部会走一遍 reset()，settings.reset() 会把 updateSettings
    // 冲掉；必须在 initialize 之后再设一次，缓冲目标才真正生效。
    applyBufferSettings(videoPlayer,infiniteDuration);
@@ -350,27 +394,11 @@ class _JsWebVideoState extends State<JsWebVideo> {
    // 数据之前也一直是 0，所以等这两个条件等于永远不播。
    if(d.autoplay){trace('pre autoplay');play();trace('post autoplay');}
    else{trace('no autoplay');}
-   // 起始位置要在元素起播前就位，否则 dash.js 已经把流推进到 0 秒附近，seek 就得
-   // 重新缓冲，用户还会先看到几秒开头画面。起播前 currentTime 一定还是 0，所以
-   // currentTime>0 就说明起播已经跑在 seek 前面了，直接放弃，别去追。
-   var applied=false;
-   function applyStart(why){
-    if(applied)return;
-    if(v.currentTime>0.01){applied=true;notify('log','start skip already at '+v.currentTime.toFixed(2)+' via '+why);return;}
-    if(v.readyState<1){notify('log','start wait readyState='+v.readyState+' via '+why);return;}
-    applied=true;
-    try{videoPlayer&&videoPlayer.seek(d.start/1000);}catch(e){try{v.currentTime=d.start/1000;}catch(e2){}}
-    notify('log','start applied '+d.start+'ms via '+why+' ct='+v.currentTime.toFixed(2));
-   }
-   if(d.start>0){
-    v.addEventListener('loadedmetadata',function(){applyStart('metadata');},{once:true});
-    setTimeout(function(){applyStart('timeout');},5000);
-   }
    // 起播窗口只在前 20s：之后还打 trace 只会给每条日志加一次 JSON 桥往返。
    var traceTicks=0;
-   var traceTimer=setInterval(function(){
+   traceTimer=setInterval(function(){
     traceTicks++;trace('tick '+traceTicks);
-    if(traceTicks>=20)clearInterval(traceTimer);
+    if(traceTicks>=20){clearInterval(traceTimer);traceTimer=null;}
    },1000);
    notify('log','local DASH manifest created video='+hasVideo+' audio='+hasAudio+' autoplay='+!!d.autoplay);
   }catch(e){notify('error','DASH manifest setup: '+((e&&e.message)||e||'unknown'));}
@@ -379,13 +407,29 @@ class _JsWebVideoState extends State<JsWebVideo> {
  window.__dashCommand=function(m){
   if(!m)return;
   if(m.type==='play')play();
-  else if(m.type==='pause'){trace('pause cmd');try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();}
-  else if(m.type==='toggle'){trace('toggle cmd elPaused='+v.paused);if(v.paused)play();else{try{if(videoPlayer)videoPlayer.pause();}catch(e){}v.pause();}}
-  else if(m.type==='seek'){trace('seek cmd t='+m.time);try{v.currentTime=m.time;}catch(e){}}
+  else if(m.type==='pause'){trace('pause cmd');pause();}
+  else if(m.type==='toggle'){trace('toggle cmd elPaused='+v.paused);if(v.paused&&!wantPlay)play();else pause();}
+  else if(m.type==='seek'){
+   trace('seek cmd t='+m.time);
+   try{if(videoPlayer)videoPlayer.seek(m.time);else v.currentTime=m.time;}catch(e){try{v.currentTime=m.time;}catch(e2){fail('seek',e2);}}
+  }
   else if(m.type==='rate'){v.playbackRate=m.rate;}
   else if(m.type==='volume'){v.volume=m.volume;}
  };
- v.addEventListener('loadedmetadata',function(){notify('log','video loadedmetadata '+v.videoWidth+'x'+v.videoHeight+' dur='+v.duration);notify('meta',{width:v.videoWidth,height:v.videoHeight,duration:v.duration});});
+ // 页面级媒体事件兼容 DASH、HLS 和元素 play() 兜底；只注册一套。
+ // dash.js 的初始化 play 可能晚于用户的 pause；拦截媒体事件，用户意图始终优先。
+ v.addEventListener('play',function(){if(!wantPlay)pause();});
+ v.addEventListener('playing',function(){
+  if(!wantPlay){pause();return;}
+  finishPending();notify('state',{playing:true,buffering:false});
+ });
+ v.addEventListener('waiting',function(){notify('state',{playing:!v.paused,buffering:true});});
+ v.addEventListener('pause',function(){notify('state',{playing:false,buffering:false});});
+ v.addEventListener('loadedmetadata',function(){
+  var duration=isFinite(v.duration)&&v.duration>0?v.duration:0;
+  notify('log','video loadedmetadata '+v.videoWidth+'x'+v.videoHeight+' dur='+duration);
+  notify('meta',{width:v.videoWidth,height:v.videoHeight,duration:duration});
+ });
  // 进度位置不能只靠 timeupdate：MSE 挂上去之后 timeupdate 不一定按 ~4Hz 触发，
  // 一旦它停发，进度条就永远停在最后一次采样的位置（续播时会卡在 0）。
  // 所以自己按 500ms 采样，timeupdate 只作为补充信号。
@@ -394,7 +438,11 @@ class _JsWebVideoState extends State<JsWebVideo> {
   var now=Date.now();
   if(now-lastNotify<500)return;
   lastNotify=now;
-  var b=0;try{if(v.buffered.length)b=v.buffered.end(v.buffered.length-1);}catch(e){}
+  // seek 后可能存在多个不连续范围，末尾范围并不代表播放头已经缓冲到那里。
+  var b=0;
+  try{for(var i=0;i<v.buffered.length;i++){
+   if(v.currentTime>=v.buffered.start(i)&&v.currentTime<=v.buffered.end(i)){b=v.buffered.end(i);break;}
+  }}catch(e){}
   // 直播的 duration 是 Infinity，直接过桥会变成 JSON 里的 Infinity（Dart 侧
   // double 接不住）。直播时长无意义，统一报 0，由 UI 走直播分支。
   var dur=v.duration;
@@ -406,7 +454,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
  v.addEventListener('seeked',function(){lastNotify=0;reportTime('seeked');notify('log','seeked ct='+v.currentTime.toFixed(2));});
  // 暂停时也要报一次，否则最后那一段进度会丢。
  v.addEventListener('pause',function(){lastNotify=0;reportTime('pause');});
- v.addEventListener('ended',function(){lastNotify=0;reportTime('ended');notify('ended',{});});
+ v.addEventListener('ended',function(){wantPlay=false;cancelPending();lastNotify=0;reportTime('ended');notify('ended',{});});
  // 500ms 采样：元素没在走就跳过，避免空转发到 Dart。
  setInterval(function(){if(!v.paused)reportTime('tick');},500);
  v.addEventListener('error',function(){if(!booted)return;fail('video element',v.error&&v.error.code);});
@@ -444,83 +492,84 @@ __HLSJS__
 
   @override
   Widget build(BuildContext context) {
-    final ratio = widget.aspectRatio;
-    return ValueListenableBuilder(
-      valueListenable: widget.controller.videoSize,
-      builder: (context, size, _) {
-        final valid = size != null && size.width > 0 && size.height > 0;
-        final h = valid ? size.height : 9.0;
-        final w = ratio != null && ratio.isFinite && ratio > 0
-            ? h * ratio
-            : valid
-            ? size.width
-            : 16.0;
-        return Center(
-          child: SizedBox(
-            width: w,
-            height: h,
-            child: ColoredBox(
-              color: widget.fill,
-              child: InAppWebView(
-                webViewEnvironment: webViewEnvironment,
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled: true,
-                  userAgent: BrowserUa.pc,
-                  mediaPlaybackRequiresUserGesture: false,
-                  allowsInlineMediaPlayback: true,
-                  transparentBackground: false,
-                  // 纯渲染用 WebView：关掉缓存、右键菜单和滚动，省掉对应的
-                  // 存储与交互开销；页面里没有可滚动内容也不需要手势。
-                  cacheEnabled: false,
-                  disableContextMenu: true,
-                  disableVerticalScroll: true,
-                  disableHorizontalScroll: true,
-                ),
-                initialUrlRequest: URLRequest(
-                  url: WebUri(JsWebPlayer.playerPageUrl),
-                ),
-                onWebViewCreated: (controller) {
-                  RuntimeLog.info('WebView created');
-                  widget.controller.attachWebView(controller);
-                  // 页面只从 callHandler('dashMessage', …) 这一个通道上报。
-                  controller.addJavaScriptHandler(
-                    handlerName: 'dashMessage',
-                    callback: (args) {
-                      if (args.isNotEmpty) _onPageMessage(args.first);
-                      return null;
-                    },
-                  );
-                },
-                shouldInterceptRequest: _intercept,
-                onLoadStart: (controller, url) {
-                  RuntimeLog.info(
-                    'WebView load start ${url?.host ?? 'unknown'} '
-                    'loaded=$_pageLoaded',
-                  );
-                },
-                onReceivedError: (controller, request, error) {
-                  RuntimeLog.error(
-                    'WebView request failed ${request.url.host}',
-                    '${error.type}: ${error.description}',
-                  );
-                },
-                onConsoleMessage: (controller, consoleMessage) {
-                  RuntimeLog.info(
-                    'WebView console ${consoleMessage.messageLevel}: '
-                    '${consoleMessage.message}',
-                  );
-                },
-                onLoadStop: (controller, url) {
-                  RuntimeLog.info(
-                    'WebView load stop ${url?.host ?? 'unknown'} '
-                    'loaded=$_pageLoaded',
-                  );
-                  if (_pageLoaded) return;
-                  _pageLoaded = true;
-                  // 只等页面本身加载完；dash.js 是内联解析的，就绪由后端
-                  // reportPageReady 单独上报，不该在这里再套一层超时。
-                },
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Windows 上 WebView 是独立的原生 HWND，尺寸由 flutter_inappwebview
+        // 在创建时读取的父窗口客户区决定；后续 child 尺寸变化不会自动跟随。
+        // 因此这里必须让播放器占满父级约束，且不因 videoSize 变化而重建尺寸，
+        // 否则初期拿不到元数据时会被压成 16x9 细缝（只剩声音、没有画面）。
+        // 视频比例交给外层 FittedBox 与页面内的 object-fit 处理。
+        final width = constraints.maxWidth.isFinite && constraints.maxWidth > 0
+            ? constraints.maxWidth
+            : 640.0;
+        final height =
+            constraints.maxHeight.isFinite && constraints.maxHeight > 0
+            ? constraints.maxHeight
+            : 360.0;
+        return SizedBox(
+          width: width,
+          height: height,
+          child: ColoredBox(
+            color: widget.fill,
+            child: InAppWebView(
+              webViewEnvironment: webViewEnvironment,
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                userAgent: BrowserUa.pc,
+                mediaPlaybackRequiresUserGesture: false,
+                allowsInlineMediaPlayback: true,
+                transparentBackground: false,
+                // 纯渲染用 WebView：关掉缓存、右键菜单和滚动，省掉对应的
+                // 存储与交互开销；页面里没有可滚动内容也不需要手势。
+                cacheEnabled: false,
+                disableContextMenu: true,
+                disableVerticalScroll: true,
+                disableHorizontalScroll: true,
               ),
+              initialUrlRequest: URLRequest(
+                url: WebUri(JsWebPlayer.playerPageUrl),
+              ),
+              onWebViewCreated: (controller) {
+                RuntimeLog.info('WebView created');
+                widget.controller.attachWebView(controller);
+                // 页面只从 callHandler('dashMessage', …) 这一个通道上报。
+                controller.addJavaScriptHandler(
+                  handlerName: 'dashMessage',
+                  callback: (args) {
+                    if (args.isNotEmpty) _onPageMessage(args.first);
+                    return null;
+                  },
+                );
+              },
+              shouldInterceptRequest: _intercept,
+              onLoadStart: (controller, url) {
+                RuntimeLog.info(
+                  'WebView load start ${url?.host ?? 'unknown'} '
+                  'loaded=$_pageLoaded',
+                );
+              },
+              onReceivedError: (controller, request, error) {
+                RuntimeLog.error(
+                  'WebView request failed ${request.url.host}',
+                  '${error.type}: ${error.description}',
+                );
+              },
+              onConsoleMessage: (controller, consoleMessage) {
+                RuntimeLog.info(
+                  'WebView console ${consoleMessage.messageLevel}: '
+                  '${consoleMessage.message}',
+                );
+              },
+              onLoadStop: (controller, url) {
+                RuntimeLog.info(
+                  'WebView load stop ${url?.host ?? 'unknown'} '
+                  'loaded=$_pageLoaded',
+                );
+                if (_pageLoaded) return;
+                _pageLoaded = true;
+                // 只等页面本身加载完；dash.js 是内联解析的，就绪由后端
+                // reportPageReady 单独上报，不该在这里再套一层超时。
+              },
             ),
           ),
         );

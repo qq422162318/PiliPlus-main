@@ -5,12 +5,18 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
-/// 顺序追加日志，限制文件大小和待写队列，避免日志影响播放。
+/// 只保留本机当日的日志；顺序追加并限制文件大小和待写队列。
 class RuntimeLogFile {
-  RuntimeLogFile(this.file, {this.maxBytes = 5 * 1024 * 1024});
+  RuntimeLogFile(
+    this.file, {
+    this.maxBytes = 5 * 1024 * 1024,
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now;
 
   final File file;
   final int maxBytes;
+  final DateTime Function() _now;
+  String? _day;
   Future<void> _pending = Future.value();
   int _queued = 0;
   Object? error;
@@ -35,20 +41,44 @@ class RuntimeLogFile {
       .replaceAll(_secrets, '[redacted credential]')
       .replaceAll(_urls, '[redacted URL]');
 
+  /// 启动时按日志记录的日期过滤，不能用修改时间：追加会把旧日志的 mtime 变成今天。
+  /// 堆栈等续行跟随上一条记录，同一天重启仍保留当天记录。
+  Future<void> _prepareDay(String day) async {
+    if (_day == day) return;
+    final previous = File('${file.path}.previous');
+    if (await previous.exists()) await previous.delete();
+    if (await file.exists()) {
+      final retained = StringBuffer();
+      if (_day == null && await file.length() < maxBytes) {
+        var keep = false;
+        for (final line in await file.readAsLines()) {
+          final match = RegExp(r'^(\d{4}-\d{2}-\d{2})T').firstMatch(line);
+          if (match != null) keep = match[1] == day;
+          if (keep) retained.writeln(line);
+        }
+      }
+      await file.writeAsString(retained.toString());
+    }
+    _day = day;
+  }
+
   Future<void> write(String level, String message) {
     if (_queued >= 256 || error != null) return Future.value();
     final safe = sanitize(message);
     final text = safe.length > 8192 ? '${safe.substring(0, 8192)}…' : safe;
-    final line = '${DateTime.now().toIso8601String()} [$level] $text\n';
     _queued++;
     _pending = _pending.then((_) async {
       try {
+        // 在队列执行时取日期，避免午夜前积压的写入又把昨天的日志带回来。
+        final timestamp = _now().toLocal().toIso8601String();
+        await _prepareDay(timestamp.substring(0, 10));
         if (await file.exists() && await file.length() >= maxBytes) {
-          final previous = File('${file.path}.previous');
-          if (await previous.exists()) await previous.delete();
-          await file.rename(previous.path);
+          await file.writeAsString('');
         }
-        await file.writeAsString(line, mode: FileMode.append);
+        await file.writeAsString(
+          '$timestamp [$level] $text\n',
+          mode: FileMode.append,
+        );
       } catch (exception) {
         // 日志目录不可写时，不把日志错误重新抛给播放器。
         error = exception;

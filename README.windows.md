@@ -27,7 +27,32 @@ C:\tmp\piliplus-tools\check-runtime-log.ps1 -Playback -Bvid BV1jfxL6uEHJ -StartS
 
 检查时应先退出其他 PiliPlus 实例。`-ExistingLogPath` 可只分析已有日志，不启动程序；默认预期 1×，其他倍速通过 `-ExpectedRate` 明确指定。脚本比较的是视频呈现位置与墙钟时间，只能筛查停顿和异常跳变；截图内容、声音与音画同步仍需另外验证。它不是 CPU/GPU 性能基准。
 
-## 本地便携环境
+## 当前 G 盘构建环境
+
+源码从 `192.168.0.102` 的 `C:\Users\admin\Downloads\PiliPlus-main` 复制到
+`G:\Downloads\buildtools\PiliPlus-active`，远端原件不修改。这里没有执行上游 `git pull`。
+
+- Flutter：`G:\Downloads\buildtools\flutter3478\flutter`（3.47.8 / Dart 3.13.7）
+- Pub 缓存：`G:\Downloads\buildtools\flutter-pub-cache`
+- NuGet：`G:\Downloads\buildtools\nuget-6.14.0\nuget.exe`（Microsoft 签名已验证）
+- NuGet 包与 HTTP 缓存：`G:\Downloads\buildtools\nuget-packages`、`nuget-http-cache`
+- C++：使用本机已安装的 Visual Studio Build Tools 2022，不迁移 Visual Studio。
+
+从任意目录运行本地构建入口（先测试，再静态检查，最后 Release 构建）：
+
+```powershell
+& 'G:\Downloads\buildtools\piliplus-local-build.ps1'
+# 已完成依赖解析时可使用 -SkipPub。
+```
+
+入口应用项目自带的 Windows 补丁，原文件备份在
+`G:\Downloads\buildtools\piliplus-windows-patches`。代理绕过仅对构建进程生效，
+不改系统代理和 Git 全局配置。构建结果不自动替换现有安装包。
+
+运行日志按本机日期保留当天记录：同日重启保留当天内容，启动时过滤其他日期，
+跨午夜首次写入清除前一天内容；超过 5 MB 清空当前文件，不再保留 `.previous`。
+
+## 原机器便携环境（历史记录）
 
 - Flutter：`C:\tmp\flutter3478\flutter`，版本 **3.47.8**（Dart 3.13.7）
 - Pub 缓存：`C:\tmp\flutter-pub-cache`

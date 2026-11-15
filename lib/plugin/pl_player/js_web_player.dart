@@ -214,6 +214,8 @@ class JsWebPlayer implements PlayerBackend {
         _streams.emitPosition(_state.position);
         _streams.emitBuffer(_state.buffer);
       case 'ended':
+        if (_state.completed) return;
+        _pendingPlay = false;
         _state.completed = true;
         _streams.emitCompleted(true);
     }
@@ -234,6 +236,8 @@ class JsWebPlayer implements PlayerBackend {
     bool expectVideo = true,
     Map<String, String> properties = const {},
   }) async {
+    // 未就绪时积压的 seek/play/pause 属于上一媒体，不能回放到新媒体上。
+    _queued.clear();
     _url = url;
     _audioUrl = audioUrl;
     _pendingPlay = play;
@@ -241,6 +245,11 @@ class JsWebPlayer implements PlayerBackend {
     _videoTrack = _decodeTrack(properties['videoTrack']);
     _audioTrack = _decodeTrack(properties['audioTrack']);
     _duration = double.tryParse(properties['duration'] ?? '');
+    _state.position = start ?? Duration.zero;
+    _state.buffer = Duration.zero;
+    _state.duration = _duration != null && _duration!.isFinite && _duration! > 0
+        ? Duration(milliseconds: (_duration! * 1000).round())
+        : Duration.zero;
     _state.completed = false;
     _applyOpen();
   }
@@ -305,8 +314,14 @@ class JsWebPlayer implements PlayerBackend {
   }
 
   @override
-  Future<void> playOrPause() async =>
-      _send('window.__dashCommand && window.__dashCommand({type:"toggle"});');
+  Future<void> playOrPause() async {
+    // 保留用户意图，而不是只切换页面元素；未就绪/缓冲时元素状态还未追上命令。
+    if (_pendingPlay) {
+      await pause();
+    } else {
+      await play();
+    }
+  }
 
   @override
   Future<void> seek(Duration position) async => _send(
@@ -336,7 +351,9 @@ class JsWebPlayer implements PlayerBackend {
 
   @override
   Future<void> reload() async {
-    if (_url.isNotEmpty) _applyOpen();
+    if (_url.isEmpty) return;
+    _start = _state.position;
+    _applyOpen();
   }
 
   @override
