@@ -272,7 +272,7 @@ class HeaderControlState extends State<HeaderControl>
   @override
   late final PlPlayerController plPlayerController = widget.controller;
   late final VideoDetailController videoDetailCtr = widget.videoDetailCtr;
-  late final PlayUrlModel videoInfo = videoDetailCtr.data;
+  PlayUrlModel get videoInfo => videoDetailCtr.data;
   static const TextStyle subTitleStyle = TextStyle(fontSize: 12);
   static const TextStyle titleStyle = TextStyle(fontSize: 14);
 
@@ -736,22 +736,14 @@ class HeaderControlState extends State<HeaderControl>
                         Get.back();
                         final int quality = item.quality!;
                         final newQa = VideoQuality.fromCode(quality);
-                        videoDetailCtr
-                          ..plPlayerController.cacheVideoQa = newQa.code
-                          ..currentVideoQa.value = newQa
-                          ..updatePlayer();
+                        if (!videoDetailCtr.selectVideoQuality(newQa)) {
+                          SmartDialog.showToast('此画质已不可用，请重新选择');
+                          return;
+                        }
 
                         SmartDialog.showToast("画质已变为：${newQa.desc}");
 
-                        // update
-                        if (!plPlayerController.tempPlayerConf) {
-                          setting.put(
-                            await ConnectivityUtils.isWiFi
-                                ? SettingBoxKey.defaultVideoQa
-                                : SettingBoxKey.defaultVideoQaCellular,
-                            quality,
-                          );
-                        }
+                        await plPlayerController.rememberVideoQuality(quality);
                       },
                       // 可能包含会员解锁画质
                       enabled: availableQa.contains(item.quality),

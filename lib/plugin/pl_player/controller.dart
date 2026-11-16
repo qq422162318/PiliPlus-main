@@ -384,6 +384,15 @@ class PlPlayerController with BlockConfigMixin {
   late final bool tempPlayerConf = Pref.tempPlayerConf;
 
   late int? cacheVideoQa = Pref.defaultVideoQa;
+
+  /// The Windows player restores the same preference on Wi-Fi and Ethernet.
+  Future<void> rememberVideoQuality(int quality) async {
+    cacheVideoQa = quality;
+    if (!tempPlayerConf) {
+      await setting.put(SettingBoxKey.defaultVideoQa, quality);
+    }
+  }
+
   late int cacheAudioQa = Pref.defaultAudioQa;
   bool enableHeart = true;
   late final enableHardwareDecoding = Pref.enableHA;

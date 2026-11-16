@@ -655,6 +655,20 @@ class VideoDetailController extends GetxController
     (prefix) => item.codecs?.startsWith(prefix) ?? false,
   );
 
+  /// Validate against the current response before changing the quality label.
+  /// A menu can outlive a reload which removes a previously available tier.
+  bool selectVideoQuality(VideoQuality quality) {
+    final videos = data.dash?.video;
+    if (videos == null ||
+        !videos.any((video) => video.id == quality.code && _isAvc(video))) {
+      return false;
+    }
+    plPlayerController.cacheVideoQa = quality.code;
+    currentVideoQa.value = quality;
+    updatePlayer();
+    return true;
+  }
+
   /// 更新画质、音质
   void updatePlayer() {
     final currentVideoQa = this.currentVideoQa.value;
@@ -939,6 +953,11 @@ class VideoDetailController extends GetxController
         preferCodecs,
       );
       firstVideo = targetVideo;
+      RuntimeLog.info(
+        'Video quality selected preferred=$cacheVideoQa actual=$targetQuality '
+        'source=${targetVideo.width}x${targetVideo.height} '
+        'bitrate=${targetVideo.bandWidth} codec=${targetVideo.codecs}',
+      );
       currentDecodeFormats = VideoDecodeFormatType.AVC;
       currentVideoQa.value = VideoQuality.fromCode(targetQuality);
       _setVideoHeight();

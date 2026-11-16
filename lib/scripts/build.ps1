@@ -11,14 +11,11 @@ try {
     $versionCode = [int]$matches[2]
     $commitHash = 'local'
 
-    # A source ZIP has no Git history; retain its declared build number.
+    # The declared version must match release tags, including in shallow clones.
+    # Git supplies provenance only; commit counts must not rewrite pubspec.yaml.
     if (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) {
-        $versionCode = [int](& git -C $projectRoot rev-list --count HEAD)
-        if ($LASTEXITCODE -ne 0) { throw 'Could not read Git build number.' }
         $commitHash = (& git -C $projectRoot rev-parse HEAD).Trim()
         if ($LASTEXITCODE -ne 0) { throw 'Could not read Git revision.' }
-        $content = $content -replace '(?m)^version:.*', "version: $versionName+$versionCode"
-        Set-Content -LiteralPath $pubspec -Value $content -NoNewline -Encoding UTF8
     }
 
     $data = @{

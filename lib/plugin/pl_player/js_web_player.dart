@@ -6,6 +6,7 @@ import 'package:PiliPlus/http/constants.dart';
 import 'package:PiliPlus/plugin/pl_player/player_backend.dart';
 import 'package:PiliPlus/services/runtime_log.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart' show Alignment, BoxFit;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 /// WebView backend hosting DASH.js.
@@ -67,9 +68,40 @@ class JsWebPlayer implements PlayerBackend {
   double? _duration;
   Map<String, dynamic>? _videoTrack;
   Map<String, dynamic>? _audioTrack;
+  Map<String, dynamic> _videoLayout = const {
+    'fit': 'contain',
+    'alignmentX': 0.0,
+    'alignmentY': 0.0,
+    'aspectRatio': null,
+  };
   final List<String> _queued = [];
 
   String get userAgent => _userAgent;
+
+  /// Fit decoded frames in the full-resolution WebView, not a Flutter FittedBox.
+  void setVideoLayout({
+    BoxFit fit = BoxFit.contain,
+    Alignment alignment = Alignment.center,
+    double? aspectRatio,
+  }) {
+    if (_disposed) return;
+    final layout = {
+      'fit': fit.name,
+      'alignmentX': alignment.x.isFinite ? alignment.x : 0.0,
+      'alignmentY': alignment.y.isFinite ? alignment.y : 0.0,
+      'aspectRatio':
+          aspectRatio != null && aspectRatio.isFinite && aspectRatio > 0
+          ? aspectRatio
+          : null,
+    };
+    if (mapEquals(layout, _videoLayout)) return;
+    _videoLayout = layout;
+    // The next open carries the latest layout; do not queue stale layout commands.
+    if (!_pageReady) return;
+    _send(
+      'window.__dashCommand && window.__dashCommand(${jsonEncode({'type': 'layout', ...layout})});',
+    );
+  }
 
   void reportPageReady() {
     if (_disposed) {
@@ -141,13 +173,16 @@ class JsWebPlayer implements PlayerBackend {
       'duration': _duration,
       'videoTrack': _videoTrack,
       'audioTrack': _audioTrack,
+      'layout': _videoLayout,
     });
     _send('window.__dashOpen && window.__dashOpen($json);');
     RuntimeLog.info(
       'DASH.js open sent videoHost=${Uri.tryParse(_url)?.host ?? 'invalid'} '
       'externalAudio=${_audioUrl?.isNotEmpty ?? false} '
       'videoSegmentBase=${_hasSegmentBase(_videoTrack)} '
-      'audioSegmentBase=${_hasSegmentBase(_audioTrack)}',
+      'audioSegmentBase=${_hasSegmentBase(_audioTrack)} '
+      'source=${_videoTrack?['width']}x${_videoTrack?['height']} '
+      'bitrate=${_videoTrack?['bandWidth']} codec=${_videoTrack?['codecs']}',
     );
   }
 

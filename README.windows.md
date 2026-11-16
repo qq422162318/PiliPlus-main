@@ -49,7 +49,7 @@ Flutter SDK 不替代 MSVC 或 Windows SDK。建议使用独立 Flutter SDK 和 
 下面的 G 盘路径只是示例，可以换成自己的目录。不要覆盖已有源码或工具目录。
 
 ```powershell
-git clone https://github.com/qq422162318/PiliPlus-main.git
+git clone --branch v2.1.6.10 --single-branch https://github.com/qq422162318/PiliPlus-main.git
 Set-Location PiliPlus-main
 
 $ToolsRoot = 'G:\Downloads\buildtools'
@@ -90,7 +90,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows Release 编译失败' }
 
 ### 补丁会修改什么
 
-`lib/scripts/patch.ps1` 对 Flutter SDK 和解析得到的 `material_ui` 应用仓库内的补丁。它先检查整组补丁、备份原文件，再修改；重复运行会识别已应用状态。默认备份目录为 `$env:TEMP\piliplus-windows-patches`，可通过 `-BackupRoot` 指定其他位置。
+`lib/scripts/patch.ps1` 对 Flutter SDK、解析得到的 `material_ui` 和 `flutter_inappwebview_windows` 应用仓库内的补丁。WebView 补丁将视频纹理采样改为 `FilterQuality.medium`，避免非整数缩放或手势放大时使用最近邻产生像素块。脚本先检查整组补丁、备份原文件，再修改；重复运行会识别已应用状态。默认备份目录为 `$env:TEMP\piliplus-windows-patches`，可通过 `-BackupRoot` 指定其他位置。
 
 若报版本不匹配或补丁部分应用，先检查 SDK、包版本与备份，不要直接删除缓存或重置 SDK。
 
@@ -98,11 +98,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows Release 编译失败' }
 
 `lib/scripts/build.ps1` 生成被 Git 忽略的 `pili_release.json`，写入版本名、构建号、提交哈希与构建时间。
 
-- Git 工作树：构建号取自 `git rev-list --count HEAD`，脚本同时改写 `pubspec.yaml` 的构建号。
-- 不含 `.git` 的源码目录：使用 `pubspec.yaml` 声明的构建号，提交哈希记为 `local`。
-- 浅克隆会导致提交数不足；正式发布应使用完整历史。若使用过 `--depth`，先执行 `git fetch --unshallow`。
+- 版本名和构建号统一取自 `pubspec.yaml` 的声明；`v2.1.6.10` 对应 `2.1.6+10`。脚本不再按 Git 提交数改写版本号，也不会修改 `pubspec.yaml`，浅克隆不会改变版本号。
+- Git 工作树：读取当前提交哈希作为源码标识。
+- 不含 `.git` 的源码目录：提交哈希记为 `local`。
 
-这两个文件可能因构建而变化，不要把生成文件、包缓存或完整编译产物直接提交进源码仓库。
+正式发布应先提交源码，并以该提交构建和创建标签。不要把生成的 `pili_release.json`、包缓存或完整编译产物直接提交进源码仓库。
 
 ## 5. 打包与校验
 
@@ -128,23 +128,31 @@ Get-FileHash -LiteralPath $Zip -Algorithm SHA256
 
 ## 6. 测试与验证边界
 
-如果工作副本中有完整的 `test` 目录，可运行：
+`v2.1.6.10` 起发布源码包含完整的 `test` 目录，可运行：
 
 ```powershell
 & $Flutter test --no-pub
 ```
 
-若有 `test/plugin/pl_player/dash_shell_test.cjs`，可用 Node.js 运行嵌入式页面测试：
+用 Node.js 运行嵌入式页面测试：
 
 ```powershell
 node --test .\test\plugin\pl_player\dash_shell_test.cjs
 ```
 
-注意：仓库目前的 `.gitignore` 含 `test*` 规则，部分本地测试文件没有提交。**全新克隆不能保证带有这些测试**，不要把本地测试结果表述为所有人都可直接从该标签复现的测试集。测试与 Windows 构建应串行执行，避免原生构建锁争用。
+版本信息脚本的回归测试验证源码 ZIP、Git 工作树和浅克隆均保留声明版本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\test\scripts\build_version_test.ps1
+```
+
+测试目录已纳入 `v2.1.6.10` 源码；旧标签可能没有完整测试。测试与 Windows 构建应串行执行，避免原生构建锁争用。
 
 `v2.1.6.9` 本地发布验证：14 项嵌入式页面测试通过；58 项 Flutter 测试通过、1 项跳过；Windows Release 编译成功；ZIP 中 72 个文件与编译输出逐个校验，发布资产下载校验一致。真实原生媒体测试因未提供 `PILIPLUS_NATIVE_TEST_MEDIA` 样片而跳过。
 
-**这些结果不验证最终画面、声音、音画同步、全屏/缩放或桌面图标点击范围。** 尤其 WebView 原生窗口的显示和尺寸仍需运行时检查；不能以音频正常或 `currentTime` 推进证明视频画面正常。
+`v2.1.6.10` 修复版本地验证：19 项嵌入式页面测试通过；73 项 Flutter 测试通过、1 项原生真实样片测试因未提供 `PILIPLUS_NATIVE_TEST_MEDIA` 跳过。布局回归覆盖不同视口与 100%/125%/150%/200% DPI；运行时日志显示实际视口取代固定 `640×360`，用户确认画面播放正常。
+
+**自动测试不证明所有最终画面、声音、音画同步、全屏/缩放或桌面图标点击场景均正常。** 全屏、跨屏 DPI、HLS/直播、4K/HDR 等仍需对应运行时验证；不能以音频正常或 `currentTime` 推进证明视频画面正常。
 
 ## 7. 日志规则
 
@@ -185,6 +193,12 @@ Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY, Env:ALL_PROXY -ErrorAction Silently
 ### 只有声音、没有画面，或 WebView 遮挡桌面
 
 确认 WebView2 Runtime 已安装。记录问题发生时的窗口尺寸、显示缩放比例、全屏/缩放状态及版本，配合当天日志排查原生 WebView 窗口边界。先退出其他实例；不要只看播放时间和音频就断言画面恢复。
+
+### 1080p 也有明显像素块
+
+JS 后端必须直接使用播放器的实际布局尺寸，不能将 WebView 放在 `FittedBox` 内：无界约束会使其退回 `640×360` 渲染，然后再被放大到窗口/全屏，损失源视频细节。当前布局在页面内完成适配、裁剪与比例调整，并由插件使用显示器 DPI 渲染。日志中的 `render viewport=... dpr=... targetPixels=... source=...` 可区分渲染尺寸与解码分辨率。
+
+未保存过画质时桌面默认选择 1080p；已有偏好不被覆盖。账号或视频没有该档位时仍按实际可播放的 AVC 轨回退，不能凭空提升源视频细节。画质菜单的手动选择保存到桌面播放器读取的同一配置项（包括有线网络），临时播放器配置不持久化。查看 `Video quality selected` 日志可确认实际轨道、分辨率、码率和编码。
 
 ### 旧版 fvp / mpv 设置没有效果
 

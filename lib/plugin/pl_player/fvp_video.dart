@@ -36,7 +36,10 @@ class FvpVideo extends StatelessWidget {
               valueListenable: controller.textureId,
               builder: (context, textureId, _) =>
                   textureId != null && textureId >= 0
-                  ? Texture(textureId: textureId)
+                  ? Texture(
+                      textureId: textureId,
+                      filterQuality: FilterQuality.medium,
+                    )
                   : const SizedBox.expand(),
             ),
           ),

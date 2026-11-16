@@ -33,6 +33,7 @@ $TextPainterPatch = "lib/scripts/text_painter.patch"
 $SliverPatch = "lib/scripts/sliver.patch"
 $RefreshIndicatorPatch = "lib/scripts/refresh_indicator.patch"
 $DoubleTapGesturePatch = "lib/scripts/double_tap_gesture.patch"
+$WebViewVideoTexturePatch = "lib/scripts/webview_video_texture.patch"
 
 $patches = @($ModalBarrierPatch, $TextSelectionPatch, $MouseCursorPatch,
             $ImageAnimPatch, $LayoutBuilderPatch, $NavigationDrawerPatch,
@@ -115,4 +116,9 @@ $materialRoot = [Uri]::new($configUri, [string]$material.rootUri).LocalPath
 
 Apply-PatchSet -Target $FlutterRoot -Patches $patches -Name 'flutter'
 Apply-PatchSet -Target $materialRoot -Patches $patches_material -Name 'material_ui'
-Write-Host 'Windows SDK and material_ui patches complete.'
+
+$webView = $config.packages | Where-Object { $_.name -eq 'flutter_inappwebview_windows' }
+if (-not $webView) { throw 'flutter_inappwebview_windows is missing from package_config.json.' }
+$webViewRoot = [Uri]::new($configUri, [string]$webView.rootUri).LocalPath
+Apply-PatchSet -Target $webViewRoot -Patches @($WebViewVideoTexturePatch) -Name 'webview_video_texture'
+Write-Host 'Windows SDK, material_ui and WebView video patches complete.'

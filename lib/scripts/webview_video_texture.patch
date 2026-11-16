@@ -1,0 +1,13 @@
+diff --git a/lib/src/in_app_webview/in_app_webview.dart b/lib/src/in_app_webview/in_app_webview.dart
+--- a/lib/src/in_app_webview/in_app_webview.dart
++++ b/lib/src/in_app_webview/in_app_webview.dart
+@@ -308,6 +308,9 @@ class WindowsInAppWebViewWidget extends PlatformInAppWebViewWidget {
+     }
+
+     return CustomPlatformView(
++      // Video surfaces may be fractionally scaled or zoomed by Flutter.
++      // Nearest-neighbour sampling makes those frames visibly blocky.
++      filterQuality: FilterQuality.medium,
+       onPlatformViewCreated: _onPlatformViewCreated,
+       creationParams: <String, dynamic>{
+         'initialUrlRequest': params.initialUrlRequest?.toMap(),

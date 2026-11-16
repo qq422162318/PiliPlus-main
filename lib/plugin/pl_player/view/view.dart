@@ -41,7 +41,6 @@ import 'package:PiliPlus/plugin/pl_player/widgets/common_btn.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/forward_seek.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/play_pause_btn.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
-import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -49,8 +48,6 @@ import 'package:PiliPlus/utils/extension/theme_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
-import 'package:PiliPlus/utils/storage.dart';
-import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:collection/collection.dart';
@@ -66,10 +63,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:get/get.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:PiliPlus/plugin/pl_player/fvp_adapter.dart';
-import 'package:PiliPlus/plugin/pl_player/fvp_video.dart';
-import 'package:PiliPlus/plugin/pl_player/js_web_player.dart';
-import 'package:PiliPlus/plugin/pl_player/js_web_video.dart';
+import 'package:PiliPlus/plugin/pl_player/video_surface.dart';
 
 part 'widgets.dart';
 
@@ -546,22 +540,14 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                       }
                       final int quality = item.quality!;
                       final newQa = VideoQuality.fromCode(quality);
-                      videoDetailController
-                        ..plPlayerController.cacheVideoQa = newQa.code
-                        ..currentVideoQa.value = newQa
-                        ..updatePlayer();
+                      if (!videoDetailController.selectVideoQuality(newQa)) {
+                        SmartDialog.showToast('此画质已不可用，请重新选择');
+                        return;
+                      }
 
                       SmartDialog.showToast("画质已变为：${newQa.desc}");
 
-                      // update
-                      if (!plPlayerController.tempPlayerConf) {
-                        GStorage.setting.put(
-                          await ConnectivityUtils.isWiFi
-                              ? SettingBoxKey.defaultVideoQa
-                              : SettingBoxKey.defaultVideoQaCellular,
-                          quality,
-                        );
-                      }
+                      await plPlayerController.rememberVideoQuality(quality);
                     },
                     child: Text(
                       item.newDesc ?? item.quality.toString(),
@@ -1689,26 +1675,13 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                 final videoFit = plPlayerController.videoFit.value;
                 final backend = plPlayerController.backend;
                 if (backend == null) return const SizedBox.shrink();
-                return Transform.flip(
+                return PlayerVideoSurface(
+                  backend: backend,
+                  videoFit: videoFit,
+                  fill: widget.fill,
+                  alignment: widget.alignment,
                   flipX: plPlayerController.flipX.value,
                   flipY: plPlayerController.flipY.value,
-                  child: FittedBox(
-                    fit: videoFit.boxFit,
-                    alignment: widget.alignment,
-                    child: switch (backend) {
-                      final JsWebPlayer js => JsWebVideo(
-                        controller: js,
-                        fill: widget.fill,
-                        aspectRatio: videoFit.aspectRatio,
-                      ),
-                      final FvpPlayer fvp => FvpVideo(
-                        controller: fvp,
-                        fill: widget.fill,
-                        aspectRatio: videoFit.aspectRatio,
-                      ),
-                      _ => const SizedBox.shrink(),
-                    },
-                  ),
                 );
               },
             ),

@@ -150,4 +150,7 @@ pili_release.json
 
 dist
 
+# Regression tests are part of the release source.
 test*
+!/test/
+!/test/**

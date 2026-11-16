@@ -24,13 +24,17 @@ class JsWebVideo extends StatefulWidget {
     super.key,
     required this.controller,
     this.fill = Colors.black,
+    this.fit = BoxFit.contain,
+    this.alignment = Alignment.center,
     this.aspectRatio,
   });
 
   final JsWebPlayer controller;
   final Color fill;
+  final BoxFit fit;
+  final Alignment alignment;
 
-  /// 仅用于页面内视频的显示比例；外层 FittedBox 负责整体缩放。
+  /// 页面内视频的显示比例；WebView 始终按播放器实际尺寸渲染。
   final double? aspectRatio;
 
   @override
@@ -47,6 +51,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
   @override
   void initState() {
     super.initState();
+    _updateVideoLayout();
     unawaited(_loadAssets());
   }
 
@@ -125,14 +130,21 @@ class _JsWebVideoState extends State<JsWebVideo> {
     if (oldWidget.controller != widget.controller) {
       _pageLoaded = false;
     }
+    _updateVideoLayout();
   }
+
+  void _updateVideoLayout() => widget.controller.setVideoLayout(
+    fit: widget.fit,
+    alignment: widget.alignment,
+    aspectRatio: widget.aspectRatio,
+  );
 
   /// 播放器页面。dash.js / hls.js 由 [JsWebVideo] 内联进这个页面，不发外网请求。
   String _buildDashShell(String dashJsSource, String hlsJsSource) {
     const html = r'''
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body,#v{width:100%;height:100%;margin:0;background:#000;overflow:hidden}#v{object-fit:contain}</style>
+<style>html,body{width:100%;height:100%;margin:0;background:#000;overflow:hidden}#v{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;image-rendering:auto}</style>
 </head>
 <body><video id="v" playsinline crossorigin="anonymous"></video>
 <script>
@@ -145,6 +157,45 @@ class _JsWebVideoState extends State<JsWebVideo> {
  window.addEventListener('unhandledrejection',function(e){if(!booted)return;fail('page promise',e.reason);});
  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
  function range(v){if(typeof v==='string')return v;if(v&&typeof v==='object'&&v.start!==undefined)return v.start+'-'+v.end;return '';}
+ // WebView stays viewport-sized. Only the decoded video is fitted, avoiding a
+ // low-resolution intermediate texture enlarged by Flutter's FittedBox.
+ var videoLayout={fit:'contain',alignmentX:0,alignmentY:0},layoutLast='';
+ function layoutVideo(){
+  var viewportWidth=Number(window.innerWidth),viewportHeight=Number(window.innerHeight);
+  if(!(viewportWidth>0&&viewportHeight>0))return;
+  var dpr=Number(window.devicePixelRatio)||1;
+  var track=opened&&opened.videoTrack||{};
+  var sourceWidth=v.videoWidth||track.width,sourceHeight=v.videoHeight||track.height;
+  var width=viewportWidth,height=viewportHeight;
+  if(sourceWidth>0&&sourceHeight>0){
+   // Original-size mode means one source pixel per physical display pixel.
+   var naturalHeight=sourceHeight/dpr,naturalWidth=sourceWidth/dpr;
+   var ratio=Number(videoLayout.aspectRatio);
+   if(isFinite(ratio)&&ratio>0)naturalWidth=naturalHeight*ratio;
+   var x=viewportWidth/naturalWidth,y=viewportHeight/naturalHeight,scale=1;
+   switch(videoLayout.fit){
+    case 'fill':break;
+    case 'cover':scale=Math.max(x,y);break;
+    case 'fitWidth':scale=x;break;
+    case 'fitHeight':scale=y;break;
+    case 'none':break;
+    case 'scaleDown':scale=Math.min(1,x,y);break;
+    default:scale=Math.min(x,y);
+   }
+   if(videoLayout.fit!=='fill'){width=naturalWidth*scale;height=naturalHeight*scale;}
+   v.style.objectFit='fill';
+  }else{v.style.objectFit='contain';}
+  var ax=Number(videoLayout.alignmentX)||0,ay=Number(videoLayout.alignmentY)||0;
+  v.style.width=width+'px';v.style.height=height+'px';
+  v.style.left=((viewportWidth-width)*(ax+1)/2)+'px';
+  v.style.top=((viewportHeight-height)*(ay+1)/2)+'px';
+  var geometry='render viewport='+viewportWidth+'x'+viewportHeight+' dpr='+dpr+
+   ' targetPixels='+Math.round(viewportWidth*dpr)+'x'+Math.round(viewportHeight*dpr)+
+   ' source='+(sourceWidth||0)+'x'+(sourceHeight||0)+' fit='+(videoLayout.fit||'contain');
+  if(geometry!==layoutLast){layoutLast=geometry;notify('log',geometry);}
+ }
+ window.addEventListener('resize',layoutVideo);
+ v.addEventListener('resize',layoutVideo);
  // 单个 AdaptationSet / Representation。B 站 DASH 是每路一个独立 fMP4 文件
  // （SegmentBase + indexRange），视频轨和音频轨合成一个 MPD 时各占一个
  // AdaptationSet，BaseURL 指向各自的文件。
@@ -361,6 +412,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
  }
  function open(d){
   stop();opened=d;wantPlay=!!d.autoplay;
+  videoLayout=d.layout||{fit:'contain',alignmentX:0,alignmentY:0};layoutLast='';layoutVideo();
   if(!(window.dashjs&&window.dashjs.MediaPlayer)&&!(window.Hls&&window.Hls.isSupported)){
    fail('DASH.js load',new Error('player libraries missing'));return;
   }
@@ -415,6 +467,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
   }
   else if(m.type==='rate'){v.playbackRate=m.rate;}
   else if(m.type==='volume'){v.volume=m.volume;}
+  else if(m.type==='layout'){videoLayout=m;layoutVideo();}
  };
  // 页面级媒体事件兼容 DASH、HLS 和元素 play() 兜底；只注册一套。
  // dash.js 的初始化 play 可能晚于用户的 pause；拦截媒体事件，用户意图始终优先。
@@ -426,6 +479,7 @@ class _JsWebVideoState extends State<JsWebVideo> {
  v.addEventListener('waiting',function(){notify('state',{playing:!v.paused,buffering:true});});
  v.addEventListener('pause',function(){notify('state',{playing:false,buffering:false});});
  v.addEventListener('loadedmetadata',function(){
+  layoutVideo();
   var duration=isFinite(v.duration)&&v.duration>0?v.duration:0;
   notify('log','video loadedmetadata '+v.videoWidth+'x'+v.videoHeight+' dur='+duration);
   notify('meta',{width:v.videoWidth,height:v.videoHeight,duration:duration});
@@ -494,11 +548,10 @@ __HLSJS__
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Windows 上 WebView 是独立的原生 HWND，尺寸由 flutter_inappwebview
-        // 在创建时读取的父窗口客户区决定；后续 child 尺寸变化不会自动跟随。
-        // 因此这里必须让播放器占满父级约束，且不因 videoSize 变化而重建尺寸，
-        // 否则初期拿不到元数据时会被压成 16x9 细缝（只剩声音、没有画面）。
-        // 视频比例交给外层 FittedBox 与页面内的 object-fit 处理。
+        // The Windows composition surface follows these layout constraints
+        // and the display DPI. Do not place it under FittedBox: unbounded
+        // constraints would rasterize at the fallback below, losing detail
+        // even for a 1080p/4K source. Metadata only changes the page's video fit.
         final width = constraints.maxWidth.isFinite && constraints.maxWidth > 0
             ? constraints.maxWidth
             : 640.0;
