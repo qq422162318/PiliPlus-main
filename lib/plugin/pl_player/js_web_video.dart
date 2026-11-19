@@ -259,6 +259,9 @@ class _JsWebVideoState extends State<JsWebVideo> {
   destroy(videoPlayer);videoPlayer=null;
   if(videoBlob){try{URL.revokeObjectURL(videoBlob);}catch(e){}videoBlob=null;}
   v.pause();
+  // 原生 MP4 分支占用了 v.src，换源时必须清掉，否则会继续播旧文件。
+  // DASH/HLS 走 MSE/blob，不设 v.src，无需这一步（清它会触发多余的 load()）。
+  if(nativeSource){nativeSource=false;try{v.removeAttribute('src');v.load();}catch(e){}}
   // removeAttribute('src') 会触发 MSE 的 load()，把已 append 的数据全丢掉；
   // 换源时 dash.js 自己会 detachMediaSource，不需要这步。
  }
@@ -410,6 +413,19 @@ class _JsWebVideoState extends State<JsWebVideo> {
   v.volume=Number(opened.volume);v.playbackRate=Number(opened.rate)||1;
   if(autoplay)play();
  }
+ // MP4/FLV 直链（如充电视频试看、durl 兜底）没有 DASH 的 segmentBase，
+ // 塞进 dash.js 会报 "video segmentBase missing"。直接交给浏览器原生 <video>
+ // 播放。页面级元素事件（playing/waiting/timeupdate/ended/error）已覆盖状态上报。
+ var nativeSource=false;
+ function openNative(url,autoplay,start){
+  notify('log','native open '+String(url).split('?')[0]);
+  nativeSource=true;
+  v.src=url;
+  v.load();
+  if(isFinite(start)&&start>0){try{v.currentTime=start;}catch(e){}}
+  v.volume=Number(opened.volume);v.playbackRate=Number(opened.rate)||1;
+  if(autoplay)play();
+ }
  function open(d){
   stop();opened=d;wantPlay=!!d.autoplay;
   videoLayout=d.layout||{fit:'contain',alignmentX:0,alignmentY:0};layoutLast='';layoutVideo();
@@ -418,14 +434,20 @@ class _JsWebVideoState extends State<JsWebVideo> {
   }
   try{
    if(isOpenHls(d.video)){notify('log','HLS open '+d.video);openHls(d.video,!!d.autoplay);return;}
+   // 没有 DASH segmentBase 的直链（MP4/FLV，典型是充电视频试看的 durl 兜底）
+   // 不能进 dash.js：它会因缺少 segmentBase 直接抛错。交给原生 <video> 播放。
+   var hasVideoDash=!!(d.videoTrack&&(d.videoTrack.segmentBase||d.videoTrack.SegmentBase));
+   if(!hasVideoDash){
+    if(d.video){openNative(d.video,!!d.autoplay,Number(d.start)/1000);return;}
+    throw new Error('video segmentBase missing');
+   }
    if(!(window.dashjs&&window.dashjs.MediaPlayer)){fail('DASH.js load',new Error('dash.js library missing'));return;}
    // 点播时长已知（d.duration>0）用有限 MSE 时长；未知（0）退回 Infinity，避免
    // PT0S 的 MPD 打不开。直播走 hls.js，不经过这里。
    var infiniteDuration=!(d.duration>0);
    // 音频轨缺失时不能整段放弃：视频轨照常播，只是没有声音轨。
-   var hasVideo=!!(d.videoTrack&&(d.videoTrack.segmentBase||d.videoTrack.SegmentBase));
+   var hasVideo=true;
    var hasAudio=!!(d.audioTrack&&(d.audioTrack.segmentBase||d.audioTrack.SegmentBase));
-   if(!hasVideo)throw new Error('video segmentBase missing');
    // 视频+音频合并成单个 MPD / 单个 <video> / 单个 dash.js 实例（见 manifestXml）。
    var dashXml=manifestXml(d.video,hasAudio?d.audio:null,d.duration||0,d.videoTrack,hasAudio?d.audioTrack:null);
    videoBlob=URL.createObjectURL(new Blob([dashXml],{type:'application/dash+xml'}));

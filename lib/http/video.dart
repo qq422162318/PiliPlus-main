@@ -260,37 +260,28 @@ abstract final class VideoHttp {
           'cur_language': ?language,
         });
       case .pgc:
-        final video = Accounts.video;
-        params = await WbiSign.makSign({
-          'x-bili-locale-json':
-              '{"c_locale":{"language":"zh-Hans"},"always_translate":false}',
-          'x-bili-device-req-json': '{"platform":"web","device":"pc","spmid":"666.25","mobi_app":"web_cn"}',
-          if (video.isLogin) 'csrf': video.csrf,
-        });
-        data = {
-          "scene": "normal",
-          "video_index": {
-            "bvid": null,
-            "cid": null,
-            "ogv_season_id": seasonId,
-            "ogv_episode_id": epid,
-          },
-          "video_param": {"qn": qn},
-          "player_param": const {
-            "fnver": 0,
-            "fnval": 4048,
-            "drm_tech_type": 0,
-            "app_id": 100,
-          },
+        // 旧接口 /ogv/player/playview (POST) 已被服务端下线，稳定返回 405。
+        // 改用仍可用的 /pgc/player/web/v2/playurl (GET)。
+        params = {
+          'cid': cid,
+          'qn': qn,
+          'fnval': 4048,
+          'fnver': 0,
+          'fourk': 1,
+          'bvid': ?bvid,
+          'ep_id': ?epid,
+          'season_id': ?seasonId,
         };
+        data = null;
     }
 
     try {
+      // 番剧改用 pgc v2 接口（GET + query），其余类型保持原样。
       final res = await Request().request(
-        videoType.api,
+        videoType == VideoType.pgc ? Api.pgcUrl : videoType.api,
         data: data,
         queryParameters: params,
-        options: Options(method: videoType.method),
+        options: Options(method: videoType == VideoType.pgc ? 'GET' : videoType.method),
       );
 
       if (res.data['code'] == 0) {
@@ -299,7 +290,27 @@ abstract final class VideoHttp {
           case .ugc:
             data = PlayUrlModel.fromJson(res.data['data']);
 
-          case .pgc || .pugv:
+          case .pgc:
+            // pgc v2 的响应体在 result 字段中
+            final result = res.data['result'] ?? res.data['data'];
+            final videoInfo = result['video_info'];
+            if (videoInfo != null) {
+              data = PlayUrlModel.fromJson(videoInfo);
+              final progress = result['watch_progress'];
+              if (progress != null) {
+                data.lastPlayTime =
+                    progress['current_watch_progress'] ??
+                    progress['current_progress'];
+              }
+            } else {
+              final reason = result['not_playable_reason'];
+              if (reason != null) {
+                return Error(_parseVideoErr(reason['code'], reason['message']));
+              }
+              return const Error('视频资源不存在');
+            }
+
+          case .pugv:
             final result = res.data['data'];
             final videoInfo = result['video_info'];
             if (videoInfo != null) {
@@ -315,6 +326,7 @@ abstract final class VideoHttp {
               if (reason != null) {
                 return Error(_parseVideoErr(reason['code'], reason['message']));
               }
+              return const Error('视频资源不存在');
             }
         }
         return Success(data);

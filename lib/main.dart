@@ -124,11 +124,27 @@ Future<void> _startApplication() async {
           // 播放器页面用 DASH.js 驱动 <video>，WebView2 默认会在没有用户手势时
           // 拒绝 play()。这里放开自动播放策略，否则起播会静默失败。
           // --js-flags 给渲染进程的 V8 堆设上限：播放器页面的 JS（dash.js +
-          // hls.js）实际只用几十 MB，设 256MB 防止渲染进程在长视频/坏流下
-          // 无限膨胀（WebView2 的每个渲染进程都是独立进程，堆大 = 内存高）。
+          // hls.js）实际只用几十 MB，128MB 足够，压低渲染进程峰值内存。
+          //
+          // 以下开关只精简"用不到"的进程与服务，不动 GPU（视频硬解仍需 GPU，
+          // 禁用会走软解导致高码率卡顿）：
+          // - disable-site-isolation-trials + IsolateOrigins/size-per-process：
+          //   播放器页面与视频 CDN 跨源，WebView2 默认多开一个 ~48MB 的隔离
+          //   renderer；视频分片由 shouldInterceptRequest 自行代理，不依赖
+          //   站点隔离，关掉安全隔离对本地播放器无影响。
+          // - MediaRouter/OptimizationHints/Translate/Autofill/EdgeFeedback/
+          //   CalculateNativeWinOcclusion：停掉投屏、优化建议、翻译、表单填充、
+          //   反馈、窗口遮挡检测等后台服务与遥测。
+          // - component-update/background-networking/extensions：关掉后台组件
+          //   更新、后台联网和扩展，减少常驻 utility 进程。
           additionalBrowserArguments: [
             '--autoplay-policy=no-user-gesture-required',
-            '--js-flags=--max-old-space-size=256',
+            '--js-flags=--max-old-space-size=128',
+            '--disable-site-isolation-trials',
+            '--disable-features=IsolateOrigins,site-per-process,MediaRouter,OptimizationHints,Translate,AutofillServerCommunication,EdgeFeedback,CalculateNativeWinOcclusion',
+            '--disable-component-update',
+            '--disable-background-networking',
+            '--disable-extensions',
           ].join(' '),
         ),
       );

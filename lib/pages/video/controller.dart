@@ -864,9 +864,11 @@ class VideoDetailController extends GetxController
       if (!fromReset) {
         final progress = args.remove('progress');
         if (progress != null) {
+          // 仅当用户显式选择"继续观看"时才从指定进度起播。
           defaultST = Duration(milliseconds: progress);
         } else {
-          defaultST = Duration(milliseconds: data.lastPlayTime);
+          // 默认一律从 0 分 0 秒开始播放，忽略接口返回的 lastPlayTime 续播进度。
+          defaultST = Duration.zero;
         }
       }
 
